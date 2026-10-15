@@ -1,12 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.0）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.1）
 ======================================================
-从本机版 v1.7 移植核心逻辑，改动：
-  - 时间统一用 UTC+8（GitHub 服务器是 UTC，datetime.now() 必须显式换算北京时间）
-  - 去掉 PNG 渲染 / 进度条 / 本地K线缓存，结果直接写 data.json
-  - 不做轮内重试补拉：每 30 分钟由 Actions 定时重跑，本轮失败的品种下一轮自动补
-    （这是云端方案的核心优势——定时+耐心，绕开"配给式放行"）
+v1.1 更新（2026-10-15）：
+  - 新增新浪"当日分时"数据源（GlobalFuturesService.getGlobalFuturesMinLine）
+    作为参考价主源。原因：东财 K 线接口对云端（尤其 GitHub 海外 IP）限流严重，
+    实测一轮 24 个品种只成功 3 个；新浪分时实测覆盖 23/24 个品种，
+    且与新浪快照价格口径完全一致（同一数据体系）。
+  - 参考价优先级：新浪分时（主）→ 东财 K 线（兜底）。
+  - 当前价优先级：东财快照 → 新浪快照 → 新浪分时末根（新增第三兜底）。
+  - 美铜（hf_HG）新浪分时价格需美分→美元换算（与快照换算保持同口径）。
+  - 其余逻辑（品种表、模式判定、日历、输出格式）与 v1.0 完全一致。
+
+v1.0（2026-10-14）：
+  从本机版 v1.7 移植核心逻辑：时间统一 UTC+8；结果直接写 data.json；
+  不做轮内重试补拉，每轮由 Actions 定时重跑，失败品种下一轮自动补。
 """
 import os, sys, json, time, re, random
 import urllib.request, urllib.parse
@@ -44,9 +52,9 @@ VARIETIES = [
     ('新加坡铁矿石',  'M23',   None,         'hf_FEF'),
     ('日橡胶',       'M23',   '111.JRU00Y', 'hf_RSS3'),
     ('富时A50',      'M23',   '100.XIN9',   None),
-    ('标准普尔',     'M23',   '100.SPX',    None),
-    ('道琼工业',     'M23',   '100.DJIA',   None),
-    ('纳斯达克',     'M23',   '100.NDX',    None),
+    ('标准普尔',     'M23',   '100.SPX',    'hf_ES'),   # v1.1: 新浪兜底用标普期货
+    ('道琼工业',     'M23',   '100.DJIA',   'hf_YM'),   # v1.1: 新浪兜底用道指期货
+    ('纳斯达克',     'M23',   '100.NDX',    'hf_NQ'),   # v1.1: 新浪兜底用纳指期货
 ]
 GROUP_CLOSE = {'M23': (23, 0), 'M01': (1, 0), 'M0230': (2, 30)}
 GROUPS = ['M23', 'M01', 'M0230']
@@ -121,7 +129,7 @@ def sina_snapshot(codes):
                          'time': f[6], 'date': f[12]}
     return out
 
-# ---------------- K线（参考价） ----------------
+# ---------------- K线（参考价，东财兜底通道） ----------------
 def em_kline5(secid):
     """东财5分钟K（最近约7天）→ [(datetime, close)]，北京时间"""
     u = ('https://push2his.eastmoney.com/api/qt/stock/kline/get?secid=' + secid
@@ -189,6 +197,9 @@ def sina_5day_minline(symbol):
     return out
 
 def sina_minline_today(symbol):
+    """新浪"当日分时"（当前交易时段，含时间戳）→ [(datetime, price)]，北京时间。
+    v1.1：这是参考价主源。该接口覆盖全部外盘品种（除伦铅），
+    与新浪 hf_ 快照同数据体系，价格口径一致。"""
     u = ('https://stock2.finance.sina.com.cn/futures/api/openapi.php/'
          'GlobalFuturesService.getGlobalFuturesMinLine?symbol=' + symbol
          + '&callback=var%20d=')
@@ -307,7 +318,10 @@ def index_ref_point(now, trade_days):
         cand -= timedelta(days=1)
     return None, None
 
-def ref_price_from_bars(bars, ref_dt, max_gap_hours=14, now=None):
+def ref_price_from_bars(bars, ref_dt, max_gap_hours=14, now=None, allow_stale=False):
+    """从 [(datetime, price)] 里找 <= ref_dt 的最后一根。
+    allow_stale=True 时（新浪分时通道用）：gap 超限也放行——
+    覆盖"原糖/豆粉"这类白天已收盘、最后成交价即有效参考价的品种。"""
     best = None
     for dt, c in bars:
         if now is not None and dt > now:
@@ -319,6 +333,8 @@ def ref_price_from_bars(bars, ref_dt, max_gap_hours=14, now=None):
     if best is None:
         return None, 'missing'
     if (ref_dt - best[0]) > timedelta(hours=max_gap_hours):
+        if allow_stale:
+            return best[1], 'ok'
         feed_live = bars and (now or now_cn()) - bars[-1][0] <= timedelta(hours=8)
         if not feed_live:
             return None, 'stale'
@@ -375,7 +391,31 @@ def main():
         sina_map, sina_ok = {}, False
     print(f'快照: 东财 {len(em_map)}, 新浪 {len(sina_map)}')
 
-    # 参考价 K 线：串行拉全部（云端不缓存，每轮独立；失败的下一轮定时补）
+    # v1.1 新增：新浪"当日分时"（参考价主源）
+    #   按 symbol 去重拉取；美铜美分→美元换算；间隔 0.35s 温和请求
+    #   （铁矿石有自己的 minline + 日K 兜底逻辑，此处跳过）
+    ml_by_sym = {}
+    ml_ok = 0
+    skip_names = {'新加坡铁矿石'}
+    for name, group, secid, sina_code in VARIETIES:
+        if not sina_code or name in skip_names:
+            continue
+        sym = sina_code[3:] if sina_code.startswith('hf_') else sina_code
+        if sym in ml_by_sym:
+            continue
+        try:
+            bars = sina_minline_today(sym)
+            if sym == 'HG':
+                bars = [(t, p / 100.0) for t, p in bars]
+            ml_by_sym[sym] = bars
+            if bars:
+                ml_ok += 1
+        except Exception:
+            ml_by_sym[sym] = []
+        time.sleep(0.35)
+    print(f'新浪分时: {ml_ok}/{len(ml_by_sym)} 成功')
+
+    # 参考价 K 线（东财兜底通道）：串行拉全部（云端不缓存，每轮独立；失败的下一轮定时补）
     bars_map = {}
     kline_fail = 0
     for secid in secids:
@@ -395,6 +435,9 @@ def main():
             name = name.split('(')[0]
         ref_dt, _ = ref_map.get('IDX' if secid in INDEX_SECIDS else group, (None, None))
         ref_show = ref_dt
+        sym = (sina_code[3:] if sina_code.startswith('hf_') else sina_code) if sina_code else None
+        bars_ml = ml_by_sym.get(sym, []) if sym else []
+
         last, flag = None, False
         if secid and secid.split('.')[-1] in em_map:
             last = em_map[secid.split('.')[-1]]['last']
@@ -404,16 +447,27 @@ def main():
                 last = s_last
             elif last is not None and s_last and abs(last - s_last) / s_last > 0.005:
                 flag = True
+        if last is None and bars_ml:
+            last = bars_ml[-1][1]   # v1.1: 两个快照源都缺时，用新浪分时末根
+
         close, note = None, ''
         if ref_dt is None:
             note = '缺'
         elif name == '伦敦银现货':
-            try:
-                bars = sina_5day_minline('XAG')
-                close, st = ref_price_from_bars(bars, ref_dt, now=now)
-                if st != 'ok':
-                    note = '缺'
-            except Exception:
+            # v1.1: 新浪当日分时优先（新鲜），5 日线兜底（可跨日）
+            if bars_ml:
+                try:
+                    close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                                                    now=now, allow_stale=True)
+                except Exception:
+                    close = None
+            if close is None:
+                try:
+                    bars5 = sina_5day_minline('XAG')
+                    close, st = ref_price_from_bars(bars5, ref_dt, now=now)
+                except Exception:
+                    close = None
+            if close is None:
                 note = '缺'
         elif name == '新加坡铁矿石':
             if ref_dt is not None:
@@ -430,12 +484,38 @@ def main():
             if close is None:
                 note = '缺'
         elif secid:
-            try:
-                close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
-                if st != 'ok':
-                    note = '缺' if st == 'missing' else '过'
-            except Exception:
+            if secid in INDEX_SECIDS:
+                # 指数：保持东财现货指数优先（原口径），新浪期货分时兜底（v1.1）
+                try:
+                    close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
+                    if st != 'ok':
+                        close = None
+                except Exception:
+                    close = None
+                if close is None and bars_ml:
+                    try:
+                        close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                                                        now=now, allow_stale=True)
+                    except Exception:
+                        close = None
+            else:
+                # 商品：新浪当日分时优先（云端稳定），东财 K 线兜底（v1.1）
+                if bars_ml:
+                    try:
+                        close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                                                        now=now, allow_stale=True)
+                    except Exception:
+                        close = None
+                if close is None:
+                    try:
+                        close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
+                        if st != 'ok':
+                            note = '缺' if st == 'missing' else '过'
+                    except Exception:
+                        note = '缺'
+            if close is None and not note:
                 note = '缺'
+
         chg = pct = None
         if close is not None and last is not None and close > 0:
             chg = last - close
