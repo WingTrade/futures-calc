@@ -2,6 +2,12 @@
 """
 外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.4）
 ======================================================
+v1.6 更新（2026-10-15）：
+  - rows 每行新增 code 字段（新浪 hf_ 代码，如 "hf_GC"），供网页端直连腾讯行情
+    （qt.gtimg.cn）拉取实时最新价时做品种匹配。腾讯行情与新浪同数据体系、
+    字段协议一致（实测同一秒数值一致），且响应带 CORS 头、无 Referer 防盗链，
+    浏览器可直接获取；新浪官方接口有防盗链，网页端无法直连。
+
 v1.5 更新（2026-10-15）：
   - 美原糖（时段 15:30 → 次日 01:00）参考价标签修正：day 模式（16:50/20:50 轮，
     时段进行中）下参考 = 前一（时段）01:00 收盘价，标签同步显示该收盘时刻
@@ -668,7 +674,7 @@ def main():
             pct = chg / close * 100
         rows.append({
             'name': name, 'close': close, 'last': last, 'chg': chg, 'pct': pct,
-            'flag': flag, 'note': note,
+            'flag': flag, 'note': note, 'code': sina_code,
             'ref': ref_text if ref_text is not None else (f'{ref_show:%m-%d %H:%M}' if ref_show else None),
         })
 

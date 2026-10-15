@@ -52,7 +52,7 @@
   .down{color:var(--down); font-weight:600;}
   .zero{color:var(--zero);}
   .miss{color:var(--miss);}
-  th.ref, td.ref{font-size:11px; color:#777; text-align:center; padding-left:4px; padding-right:4px;}
+  td.ref{font-size:11px; color:#777; text-align:center; padding-left:4px; padding-right:4px;}
   .foot{
     background:#fff; border-top:1px solid var(--grid); border-radius:0 0 7px 7px;
     padding:5px 10px; font-size:11px; color:#999; line-height:1.5; margin-top:1px;
@@ -108,7 +108,7 @@
       <div id="modeDesc"></div>
     </div>
     <div class="lamps">
-      <span class="lamp"><span class="dot" id="dotEm"></span><span id="lblEm">东财</span></span>
+      <span class="lamp"><span class="dot" id="dotTx"></span><span id="lblTx">实时</span></span>
       <span class="lamp"><span class="dot" id="dotSina"></span><span id="lblSina">新浪</span></span>
     </div>
   </div>
@@ -128,15 +128,25 @@
     <div id="refDesc"></div>
     <div class="warn">不构成投资建议｜数据可能有延迟或错误，请谨慎参考</div>
   </div>
-  <div class="tip">页面每 60 秒检查新数据 · 行情每小时自动更新一轮</div>
-  <div class="tip">想立刻刷新数据？<a href="https://github.com/WingTrade/futures-calc/actions/workflows/fetch.yml" target="_blank" rel="noopener" style="color:#4A79B8;">点这里跑一轮</a>（约 2 分钟，跑完本页自动更新，无需其他操作）</div>
+  <div class="tip">打开页面即拉实时价（约 15 秒自动刷新）· 起始价每小时云端更新一轮</div>
+  <div class="tip">美燃油为延时行情（约 10-15 分钟）· 原糖 / 棉花 / 马棕油 / 铁矿 / 日橡胶无实时源，按小时更新</div>
+  <div class="tip">想强制刷新起始价？<a href="https://github.com/WingTrade/futures-calc/actions/workflows/fetch.yml" target="_blank" rel="noopener" style="color:#4A79B8;">点这里跑一轮</a>（约 2 分钟，跑完本页自动更新，无需其他操作）</div>
 </div>
 
 <script>
+/* =====================================================================
+   外盘涨跌统计 · 前端 v2（2026-10-15）
+   数据流：
+     起始价/参考时间  ← data.json（GitHub Actions 每小时云端生成，含复杂时段判定）
+     最新价          ← 腾讯行情 qt.gtimg.cn 浏览器直连（与新浪同数据源、同口径；
+                       新浪官方接口有防盗链+CORS限制，浏览器直接拉会被拦，
+                       腾讯接口带 CORS 头、无 Referer 校验，实测同秒数值一致）
+   打开流程：本地缓存秒开 → 拉 data.json（起始价）→ 拉腾讯（最新价，每 15 秒刷新）
+   ===================================================================== */
 function fmt2(v, signed){
   if(v==null) return '—';
   if(Math.abs(v)<0.005) return '0.00';
-  return (signed?(v>0?'+':''):'') + v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return (signed?(v>0?'+':'') : '') + v.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 function fmtPct(v){
   if(v==null) return '—';
@@ -149,6 +159,61 @@ function cls(v){
   return v>0?'up':'down';
 }
 var SHORT_NAMES = { '新加坡铁矿石': '新加坡铁矿' };
+
+/* ---------- 实时通道（腾讯行情）配置 ---------- */
+var TX_URL = 'https://qt.gtimg.cn/q=';
+var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
+var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
+var CACHE_KEY = 'waiPanPageCacheV1';
+/* data.json 尚未带 code 字段（旧版）时，用品种名兜底匹配腾讯代码 */
+var NAME2CODE = {
+  'WTI原油':'hf_CL','WTI原油(23:00)':'hf_CL','WTI原油(02:30)':'hf_CL',
+  '布伦特原油':'hf_OIL','布伦特原油(23:00)':'hf_OIL','布伦特原油(02:30)':'hf_OIL',
+  '美黄金':'hf_GC','美白银':'hf_SI','伦敦银现货':'hf_XAG',
+  '伦铝':'hf_AHD','伦锌':'hf_ZSD','伦镍':'hf_NID','伦锡':'hf_SND',
+  '美铜':'hf_HG','伦铜':'hf_CAD','伦铅':'hf_PBD',
+  '美燃油':'hf_HO','美国天然气':'hf_NG',
+  '美大豆':'hf_S','美黄豆粉':'hf_SM','美黄豆油':'hf_BO',
+  '美原糖':'hf_RS','美国棉花':'hf_CT','马棕油':'hf_FCPO',
+  '新加坡铁矿石':'hf_FEF','日橡胶':'hf_RSS3'
+};
+/* 腾讯代码例外表：默认与新浪 hf_ 代码一致，个别品种不同。
+   美燃油：腾讯无 hf_HO 实时源，须用 fuHO（延时行情，约 10-15 分钟） */
+var TX_OVERRIDE = { 'hf_HO': 'fuHO' };
+
+/* ---------- 状态 ---------- */
+var state = { data:null, tx:null, txTime:'', txFail:0 };
+var txBusy = false, jsonBusy = false;
+var fastTimer = null, jsonTimer = null;
+
+function rowCode(r){
+  if(!r) return null;
+  var c = r.code || NAME2CODE[r.name] || null;   /* 新版优先 code 字段；旧版按名称兜底 */
+  return c ? (TX_OVERRIDE[c] || c) : null;
+}
+function setLamp(dotId, lblId, ok){
+  document.getElementById(dotId).className = 'dot ' + (ok?'g':'r');
+  document.getElementById(lblId).style.color = ok?'#2ecc71':'#e74c3c';
+}
+function hhmm(s){
+  s = String(s==null?'':s);
+  return s.length>=16 ? s.slice(11,16) : s;
+}
+
+/* ---------- 本地缓存：打开秒开 ---------- */
+function loadCache(){
+  try{
+    var s = localStorage.getItem(CACHE_KEY);
+    if(!s) return;
+    var o = JSON.parse(s);
+    if(o && o.data && o.data.rows) state.data = o.data;
+  }catch(e){}
+}
+function saveCache(d){
+  try{ localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(), data:d})); }catch(e){}
+}
+
+/* ---------- 渲染 ---------- */
 function rowHtml(r){
   var nm = SHORT_NAMES[r.name] || r.name;
   var flag = r.flag ? ' ※' : '';
@@ -159,37 +224,145 @@ function rowHtml(r){
     '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+flag+'</td>'+
     '<td class="ref">'+(r.ref||'—')+'</td>';
 }
-function render(d){
+function render(){
+  var d = state.data;
+  if(!d || !d.rows) return;
   document.getElementById('title').textContent = d.mode==='day' ? '对比15:00涨跌统计（日间）' : '隔夜涨跌统计';
-  document.getElementById('genTime').textContent = '更新于 ' + d.generated_at;
-  document.getElementById('modeDesc').textContent = d.mode_desc || '';
-  setLamp('dotEm','lblEm', d.em_ok);
-  setLamp('dotSina','lblSina', d.sina_ok);
+  var gen = hhmm(d.generated_at);
+  if(state.tx && state.txTime){
+    document.getElementById('genTime').textContent = '实时 ' + state.txTime;
+  }else{
+    document.getElementById('genTime').textContent = gen ? ('数据 ' + gen) : '加载中…';
+  }
+  document.getElementById('modeDesc').textContent = (d.mode_desc||'') + (gen ? (' · 起始价 ' + gen + ' 生成') : '');
+  setLamp('dotSina','lblSina', !!d.sina_ok);
   document.getElementById('refDesc').textContent = d.ref_desc || '';
   var tb = document.getElementById('tbody');
   tb.innerHTML = '';
-  var rows = d.rows || [];
-  for(var i=0;i<rows.length;i++){
+  for(var i=0;i<d.rows.length;i++){
+    var r = d.rows[i];
+    var t = (state.tx && rowCode(r)) ? state.tx[rowCode(r)] : null;
+    var last = (t && t.last!=null) ? t.last : r.last;
+    var chg = r.chg, pct = r.pct;
+    if(t && r.close!=null && last!=null && r.close>0){
+      chg = last - r.close;                    /* 前端即时重算：实时价 - 缓存起始价 */
+      pct = chg / r.close * 100;
+    }
     var tr = document.createElement('tr');
-    tr.innerHTML = rowHtml(rows[i]);
+    tr.innerHTML = rowHtml({name:r.name, close:r.close, last:last, chg:chg, pct:pct, flag:r.flag, ref:r.ref});
     tb.appendChild(tr);
   }
 }
-function setLamp(dotId, lblId, ok){
-  document.getElementById(dotId).className = 'dot ' + (ok?'g':'r');
-  document.getElementById(lblId).style.color = ok?'#2ecc71':'#e74c3c';
-}
-async function load(){
+
+/* ---------- data.json：起始价（每小时云端更新） ---------- */
+async function loadJson(){
+  if(jsonBusy) return false;
+  jsonBusy = true;
   try{
     var r = await fetch('data.json?t='+Date.now(), {cache:'no-store'});
     if(!r.ok) throw new Error('HTTP '+r.status);
-    render(await r.json());
+    var d = await r.json();
+    state.data = d;
+    saveCache(d);
+    render();
+    return true;
   }catch(e){
-    document.getElementById('genTime').textContent = '数据加载失败';
+    if(!state.data && !state.tx){
+      document.getElementById('genTime').textContent = '数据加载失败';
+    }
+    return false;
+  }finally{
+    jsonBusy = false;
   }
 }
-load();
-setInterval(load, 60000);
+
+/* ---------- 腾讯行情：最新价（打开即拉 + 定时刷新） ---------- */
+function collectCodes(){
+  var seen = {}, codes = [];
+  var rows = (state.data && state.data.rows) || [];
+  for(var i=0;i<rows.length;i++){
+    var c = rowCode(rows[i]);
+    if(c && !seen[c]){ seen[c] = 1; codes.push(c); }
+  }
+  return codes;
+}
+async function refreshTx(){
+  if(txBusy) return;
+  if(!state.data) return;
+  var codes = collectCodes();
+  if(!codes.length) return;
+  txBusy = true;
+  try{
+    var resp = await fetch(TX_URL + codes.join(','), {cache:'no-store'});
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
+    var text = await resp.text();   /* 响应头 charset=GBK，浏览器自动按 GBK 解码 */
+    var re = /v_(hf_\w+|fu\w+)="([^"]*)"/g, m;
+    var tx = {}, maxT = '';
+    while((m = re.exec(text))){
+      var code = m[1], body = m[2];
+      var last = null, tstr = '';
+      if(code.indexOf('fu') === 0){
+        /* 波浪格式（延时行情，时间戳为美东时区）：f[3]=最新价、f[30]=时间 */
+        var fb = body.split('~');
+        if(fb.length > 30 && fb[3]){ last = parseFloat(fb[3]); tstr = fb[30] || ''; }
+      }else{
+        /* 逗号格式（实时，时间戳为北京时间）：f[0]=最新价、f[6]=时间 */
+        var fc = body.split(',');
+        if(fc.length > 12 && fc[0]){
+          last = parseFloat(fc[0]);
+          if(code === 'hf_HG') last = last / 100;   /* 美铜：接口为美分/磅，页面用美元/磅（与 data.json 同口径） */
+          tstr = fc[6] || '';
+        }
+      }
+      if(last == null || isNaN(last)) continue;
+      tx[code] = { last:last, time:tstr };
+      /* 头部「实时」时间只取实时通道（hf_ 系）的时间戳，延时品种不参与比较 */
+      if(code.indexOf('fu') !== 0 && tstr > maxT) maxT = tstr;
+    }
+    if(!Object.keys(tx).length) throw new Error('empty');
+    state.tx = tx;
+    state.txTime = maxT;
+    state.txFail = 0;
+    setLamp('dotTx','lblTx', true);
+    render();
+  }catch(e){
+    state.txFail++;
+    if(state.txFail >= 2) setLamp('dotTx','lblTx', false);
+    /* 拉失败时保留上一轮实时值，不闪退到旧数据 */
+  }finally{
+    txBusy = false;
+  }
+}
+
+/* ---------- 调度 ---------- */
+function scheduleFast(){
+  clearTimeout(fastTimer);
+  fastTimer = setTimeout(function(){
+    refreshTx().then(scheduleFast);
+  }, TX_MS);
+}
+async function boot(){
+  loadCache();
+  render();                        /* ① 缓存秒开 */
+  await loadJson();                /* ② 起始价（data.json） */
+  refreshTx();                     /* ③ 最新价（腾讯，立即拉一次） */
+  scheduleFast();                  /* ④ 之后每 15 秒刷一次最新价 */
+}
+boot();
+jsonTimer = setInterval(loadJson, JSON_MS);   /* 每 60 秒检查一遍起始价是否更新 */
+
+/* 页面切到后台时暂停轮询（省流量/电量），切回来立即刷新 */
+document.addEventListener('visibilitychange', function(){
+  if(document.hidden){
+    clearTimeout(fastTimer); fastTimer = null;
+    clearInterval(jsonTimer); jsonTimer = null;
+  }else{
+    loadJson();
+    refreshTx();
+    scheduleFast();
+    if(!jsonTimer) jsonTimer = setInterval(loadJson, JSON_MS);
+  }
+});
 </script>
 </body>
 </html>
