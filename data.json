@@ -1,0 +1,271 @@
+{
+ "generated_at": "2026-10-15 15:03",
+ "mode": "day",
+ "mode_desc": "日间（对比今日15:00）",
+ "ref_desc": "参考: 今日 15:00",
+ "em_ok": false,
+ "sina_ok": true,
+ "kline_fail": 21,
+ "rows": [
+  {
+   "name": "WTI原油",
+   "close": null,
+   "last": 94.29,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "布伦特原油",
+   "close": null,
+   "last": 104.68,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美黄金",
+   "close": null,
+   "last": 4155.5,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美白银",
+   "close": null,
+   "last": 56.215,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "伦敦银现货",
+   "close": 56.07,
+   "last": 56.14,
+   "chg": 0.07000000000000028,
+   "pct": 0.12484394506866467,
+   "flag": false,
+   "note": "",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "伦铝",
+   "close": null,
+   "last": 2966.5,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "伦锌",
+   "close": null,
+   "last": 3682.5,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "伦镍",
+   "close": null,
+   "last": 15305.0,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "伦锡",
+   "close": null,
+   "last": 49735.0,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美铜",
+   "close": null,
+   "last": 6.5565,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "伦铜",
+   "close": null,
+   "last": 14319.5,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "伦铅",
+   "close": null,
+   "last": 1899.5,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美燃油",
+   "close": null,
+   "last": 4.8615,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美国天然气",
+   "close": null,
+   "last": 3.251,
+   "chg": null,
+   "pct": null,
+   "flag": true,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美大豆",
+   "close": null,
+   "last": 1270.25,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美黄豆粉",
+   "close": null,
+   "last": 365.4,
+   "chg": null,
+   "pct": null,
+   "flag": true,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美黄豆油",
+   "close": null,
+   "last": 66.47,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美原糖",
+   "close": null,
+   "last": 20.872,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "美国棉花",
+   "close": null,
+   "last": 79.79,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "马棕油",
+   "close": null,
+   "last": 4638.0,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "新加坡铁矿石",
+   "close": 90.065,
+   "last": 90.065,
+   "chg": 0.0,
+   "pct": 0.0,
+   "flag": false,
+   "note": "",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "日橡胶",
+   "close": null,
+   "last": 446.6,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "富时A50",
+   "close": 13499.29,
+   "last": 13499.29,
+   "chg": 0.0,
+   "pct": 0.0,
+   "flag": false,
+   "note": "",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "标准普尔",
+   "close": null,
+   "last": 7718.94,
+   "chg": null,
+   "pct": null,
+   "flag": false,
+   "note": "缺",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "道琼工业",
+   "close": 51621.48,
+   "last": 51621.48,
+   "chg": 0.0,
+   "pct": 0.0,
+   "flag": false,
+   "note": "",
+   "ref": "10-15 15:00"
+  },
+  {
+   "name": "纳斯达克",
+   "close": 26692.87,
+   "last": 26692.87,
+   "chg": 0.0,
+   "pct": 0.0,
+   "flag": false,
+   "note": "",
+   "ref": "10-15 15:00"
+  }
+ ]
+}
