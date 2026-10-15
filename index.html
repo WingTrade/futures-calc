@@ -128,14 +128,13 @@
     <div id="refDesc"></div>
     <div class="warn">不构成投资建议｜数据可能有延迟或错误，请谨慎参考</div>
   </div>
-  <div class="tip">打开页面即拉最新价：新浪/腾讯双通道每 15 秒刷新 · 起始价云端按收盘节点定时更新</div>
-  <div class="tip">全部品种均为准实时（约 8-20 秒）；通道异常时对应品种自动降级为延时备份（约 10-20 分钟）</div>
-  <div class="tip">想强制刷新起始价？<a href="https://github.com/WingTrade/futures-calc/actions/workflows/fetch.yml" target="_blank" rel="noopener" style="color:#4A79B8;">点这里跑一轮</a>（约 2 分钟，跑完本页自动更新，无需其他操作）</div>
+  <div class="tip">实时最新价 · 新浪/腾讯双通道每 15 秒刷新 · 起始价按节点定时更新</div>
+  <div class="tip">双绿灯，全部品种均为实时；红灯异常时，部分品种降级为延时</div>
 </div>
 
 <script>
 /* =====================================================================
-   外盘涨跌统计 · 前端 v2.5（2026-10-15）
+   外盘涨跌统计 · 前端 v2.6（2026-10-15）
    数据流：
      起始价/参考时间  ← data.json（GitHub Actions 云端按收盘节点定时生成，含复杂时段判定）
      最新价（准实时）  ← 新浪 hq.sinajs.cn，经自建 Cloudflare 双通道中转：
@@ -280,7 +279,7 @@ function rowHtml(r){
 function render(){
   var d = state.data;
   if(!d || !d.rows) return;
-  document.getElementById('title').textContent = d.mode==='day' ? '对比15:00涨跌统计（日间）' : '隔夜涨跌统计';
+  document.getElementById('title').textContent = d.title || (d.mode==='day' ? '对比15:00涨跌统计（日间）' : '隔夜涨跌统计');
   var gen = hhmm(d.generated_at);
   var tShow = state.txTime;                                     /* 头部时间取腾讯/新浪两通道中较新的时戳 */
   if(state.snTime && (!tShow || state.snTime > tShow)) tShow = state.snTime;
@@ -289,7 +288,7 @@ function render(){
   }else{
     document.getElementById('genTime').textContent = gen ? ('数据 ' + gen) : '加载中…';
   }
-  document.getElementById('modeDesc').textContent = (d.mode_desc||'') + (gen ? (' · 起始价 ' + gen + ' 生成') : '');
+  document.getElementById('modeDesc').textContent = gen ? ('起始价 ' + gen + ' 生成') : '';
   document.getElementById('refDesc').textContent = d.ref_desc || '';
   var tb = document.getElementById('tbody');
   tb.innerHTML = '';
