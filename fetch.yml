@@ -1,0 +1,30 @@
+name: fetch
+
+on:
+  schedule:
+    - cron: '50 * * * *'   # 每小时 50 分（UTC）= 北京时间每小时的 50 分自动跑一轮
+  workflow_dispatch:       # 手动触发：随时想看最新数据，Actions 页点 Run workflow，约 2 分钟后刷新网页即可
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 拉取数据
+        run: python fetch.py
+
+      - name: 提交数据
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.json
+          git diff --cached --quiet || git commit -m "update data $(date -u +%FT%TZ)"
+          git push

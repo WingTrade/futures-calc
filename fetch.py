@@ -1,7 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.3）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.4）
 ======================================================
+v1.5 更新（2026-10-15）：
+  - 美原糖（时段 15:30 → 次日 01:00）参考价标签修正：day 模式（16:50/20:50 轮，
+    时段进行中）下参考 = 前一（时段）01:00 收盘价，标签同步显示该收盘时刻
+    （如 "10-15 01:00"，跨周末由日K日期推算、自动正确），不再误标"今日 15:00"。
+  - 9:00/12:50 轮（时段已收）：参考 = 前一晚 23:00、最新价 = 01:00 收盘价（冻结），维持不变。
+  - 日K读取函数升级为返回 (日期, 收盘价)：`sina_dailyk_closed_bar()`。
+
+v1.4 更新（2026-10-15）：
+  - 移除"东财 vs 新浪"两源差异比对（※ 标记逻辑）：两源合约口径本就不同，
+    在东财偶发放行时会产生误导性 ※（天然气/豆粉曾差 5%~18%）。现东财仅作兜底。
+  - 新增日橡胶（RSS3）夜盘 16:00 开盘后的兜底：用日K"今天"那根（当日日盘收盘价）。
+  - 修复原糖日K 兜底取值：排除"今天"那根（含进行中的夜盘），改取"昨天"收盘。
+
 v1.3 更新（2026-10-15）：
   - 美股指数（标普/道指/纳指）口径修正为"最近一个收盘价 vs 更早一个收盘价"
     （两个收盘价相差 1 个交易日，如 10-14 收 vs 10-13 收），不再用当日开盘价做基准；
@@ -258,21 +271,37 @@ def sina_fef_dailyk():
     m = re.search(r'\((\[.*\])\)', txt, re.S)
     return json.loads(m.group(1)) if m else []
 
-def sina_dailyk_last_close(symbol):
-    """v1.1: 新浪日K最后一根收盘价（美原糖"开盘点效应"兜底用）"""
+def sina_dailyk_closed_bar(symbol, now, exclude_today=False):
+    """v1.5: 新浪日K中"已收盘"的最后一根 → (日期str, 收盘价)；无则 (None, None)。
+    exclude_today=False: 取日期 <= 北京今天的最后一根（如日橡胶：夜盘归次日，"今天"那根=当日日盘已收）；
+    exclude_today=True:  取日期 <  北京今天的最后一根（如原糖："今天"那根含进行中的夜盘，不可用）。"""
     u = ('https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20d=/'
          f'GlobalFuturesService.getGlobalFuturesDailyKLine?symbol={symbol}')
     txt = http_get(u, SINA_HEADERS)
     m = re.search(r'\((\[.*\])\)', txt, re.S)
     if not m:
-        return None
-    arr = json.loads(m.group(1))
-    if not arr:
-        return None
+        return None, None
     try:
-        return float(arr[-1]['close'])
-    except (ValueError, KeyError, TypeError):
-        return None
+        arr = json.loads(m.group(1))
+    except Exception:
+        return None, None
+    if not isinstance(arr, list):
+        return None, None
+    today = now.date()
+    for k in reversed(arr):
+        try:
+            d = datetime.strptime(k['date'], '%Y-%m-%d').date()
+        except (ValueError, KeyError, TypeError):
+            continue
+        if exclude_today and d >= today:
+            continue
+        if (not exclude_today) and d > today:
+            continue
+        try:
+            return k['date'], float(k['close'])
+        except (ValueError, KeyError, TypeError):
+            return None, None
+    return None, None
 
 def us_index_daily_bars(symbol, now, n=2):
     """v1.3: 取最近 n 根【已收盘】美股指数日线 → [(日期str, 收盘价), ...]（时间升序，新的在后）。
@@ -503,16 +532,12 @@ def main():
         bars_ml = ml_by_sym.get(sym, []) if sym else []
 
         last, flag = None, False
-        # v1.2: 新浪快照优先（与参考价同源，避免跨源合约口径差产生假涨跌）；东财兜底
+        # v1.4: 新浪快照优先（与参考价同源）；东财仅作兜底、不再做两源差异比对
+        #（两源的连续/主力合约口径本就不同，比对会产生误导性的 ※ 标记）
         if sina_code and sina_code in sina_map:
             last = sina_map[sina_code]['last']
-        if secid and secid.split('.')[-1] in em_map:
-            em_last = em_map[secid.split('.')[-1]]['last']
-            if last is None or (isinstance(last, (int, float)) and last <= 0):
-                last = em_last
-            elif em_last and isinstance(last, (int, float)) and last > 0 \
-                    and abs(last - em_last) / last > 0.005:
-                flag = True
+        if last is None and secid and secid.split('.')[-1] in em_map:
+            last = em_map[secid.split('.')[-1]]['last']
         if last is None and bars_ml:
             last = bars_ml[-1][1]   # 两个快照源都缺时，用新浪分时末根
 
@@ -536,8 +561,10 @@ def main():
             if close is None:
                 note = '缺'
         elif name == '美原糖':
-            # v1.1: 原糖时段 15:30 开盘后面临"开盘点效应"（旧时段数据被顶掉，
-            # 拿不到 15:00 参考点）→ 用新浪日K 昨交易日收盘兜底（= 今晨时段收盘价）
+            # v1.5: 原糖时段 15:30 → 次日 01:00。
+            # day 模式（时段已开盘/进行中）：参考 = 前一（时段）01:00 收盘价（日K"昨天"根，
+            # 排除"今天"根——它含 15:30 起进行中的夜盘，会随时间漂移），并同步修正标签为该收盘时刻。
+            # 夜盘模式（8:50/12:50，时段已收盘未开）：参考 = 前一晚 23:00（minline 内），逻辑不变。
             if bars_ml:
                 try:
                     close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
@@ -546,7 +573,36 @@ def main():
                     close = None
             if close is None:
                 try:
-                    close = sina_dailyk_last_close('RS')
+                    d_str, c2 = sina_dailyk_closed_bar('RS', now, exclude_today=True)
+                    if c2 is not None:
+                        close = c2
+                        # 参考的准确时点 = 该日K次日的 01:00（北京），与日K数据保持一致（跨周末自动正确）
+                        if mode == 'day' and d_str:
+                            rd = datetime.strptime(d_str, '%Y-%m-%d') + timedelta(days=1)
+                            ref_text = f'{rd:%m-%d} 01:00'
+                except Exception:
+                    close = None
+            if close is None and secid:
+                try:
+                    close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
+                    if st != 'ok':
+                        close = None
+                except Exception:
+                    close = None
+            if close is None:
+                note = '缺'
+        elif name == '日橡胶':
+            # v1.4: 日橡胶夜盘 16:00 开盘后旧时段被顶掉（同"开盘点效应"）
+            # → 用日K"今天"那根兜底（= 当日日盘收盘价，14:00 收盘后不再变）
+            if bars_ml:
+                try:
+                    close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                                                    now=now, allow_stale=True)
+                except Exception:
+                    close = None
+            if close is None:
+                try:
+                    _d, close = sina_dailyk_closed_bar('RSS3', now, exclude_today=False)
                 except Exception:
                     close = None
             if close is None and secid:
