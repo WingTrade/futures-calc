@@ -1,16 +1,16 @@
 {
- "generated_at": "2026-10-15 15:03",
+ "generated_at": "2026-10-15 15:21",
  "mode": "day",
  "mode_desc": "日间（对比今日15:00）",
  "ref_desc": "参考: 今日 15:00",
  "em_ok": false,
  "sina_ok": true,
- "kline_fail": 21,
+ "kline_fail": 22,
  "rows": [
   {
    "name": "WTI原油",
    "close": null,
-   "last": 94.29,
+   "last": 94.04,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -20,7 +20,7 @@
   {
    "name": "布伦特原油",
    "close": null,
-   "last": 104.68,
+   "last": 104.38,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -30,7 +30,7 @@
   {
    "name": "美黄金",
    "close": null,
-   "last": 4155.5,
+   "last": 4162.3,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -40,7 +40,7 @@
   {
    "name": "美白银",
    "close": null,
-   "last": 56.215,
+   "last": 56.44,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -50,9 +50,9 @@
   {
    "name": "伦敦银现货",
    "close": 56.07,
-   "last": 56.14,
-   "chg": 0.07000000000000028,
-   "pct": 0.12484394506866467,
+   "last": 56.3,
+   "chg": 0.22999999999999687,
+   "pct": 0.4102015337970338,
    "flag": false,
    "note": "",
    "ref": "10-15 15:00"
@@ -60,7 +60,7 @@
   {
    "name": "伦铝",
    "close": null,
-   "last": 2966.5,
+   "last": 2971.5,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -70,7 +70,7 @@
   {
    "name": "伦锌",
    "close": null,
-   "last": 3682.5,
+   "last": 3675.5,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -80,7 +80,7 @@
   {
    "name": "伦镍",
    "close": null,
-   "last": 15305.0,
+   "last": 15260.0,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -89,18 +89,18 @@
   },
   {
    "name": "伦锡",
-   "close": null,
-   "last": 49735.0,
-   "chg": null,
-   "pct": null,
+   "close": 49555.0,
+   "last": 49650.0,
+   "chg": 95.0,
+   "pct": 0.19170618504691755,
    "flag": false,
-   "note": "缺",
+   "note": "",
    "ref": "10-15 15:00"
   },
   {
    "name": "美铜",
    "close": null,
-   "last": 6.5565,
+   "last": 6.5585,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -110,7 +110,7 @@
   {
    "name": "伦铜",
    "close": null,
-   "last": 14319.5,
+   "last": 14295.0,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -120,7 +120,7 @@
   {
    "name": "伦铅",
    "close": null,
-   "last": 1899.5,
+   "last": 1888.0,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -130,7 +130,7 @@
   {
    "name": "美燃油",
    "close": null,
-   "last": 4.8615,
+   "last": 4.8554,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -140,7 +140,7 @@
   {
    "name": "美国天然气",
    "close": null,
-   "last": 3.251,
+   "last": 3.249,
    "chg": null,
    "pct": null,
    "flag": true,
@@ -150,7 +150,7 @@
   {
    "name": "美大豆",
    "close": null,
-   "last": 1270.25,
+   "last": 1268.5,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -160,7 +160,7 @@
   {
    "name": "美黄豆粉",
    "close": null,
-   "last": 365.4,
+   "last": 365.0,
    "chg": null,
    "pct": null,
    "flag": true,
@@ -170,7 +170,7 @@
   {
    "name": "美黄豆油",
    "close": null,
-   "last": 66.47,
+   "last": 66.35,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -190,7 +190,7 @@
   {
    "name": "美国棉花",
    "close": null,
-   "last": 79.79,
+   "last": 79.91,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -200,7 +200,7 @@
   {
    "name": "马棕油",
    "close": null,
-   "last": 4638.0,
+   "last": 4626.0,
    "chg": null,
    "pct": null,
    "flag": false,
@@ -210,9 +210,9 @@
   {
    "name": "新加坡铁矿石",
    "close": 90.065,
-   "last": 90.065,
-   "chg": 0.0,
-   "pct": 0.0,
+   "last": 89.932,
+   "chg": -0.13299999999999557,
+   "pct": -0.14767112640869992,
    "flag": false,
    "note": "",
    "ref": "10-15 15:00"
@@ -229,12 +229,12 @@
   },
   {
    "name": "富时A50",
-   "close": 13499.29,
+   "close": null,
    "last": 13499.29,
-   "chg": 0.0,
-   "pct": 0.0,
+   "chg": null,
+   "pct": null,
    "flag": false,
-   "note": "",
+   "note": "缺",
    "ref": "10-15 15:00"
   },
   {
@@ -259,12 +259,12 @@
   },
   {
    "name": "纳斯达克",
-   "close": 26692.87,
+   "close": null,
    "last": 26692.87,
-   "chg": 0.0,
-   "pct": 0.0,
+   "chg": null,
+   "pct": null,
    "flag": false,
-   "note": "",
+   "note": "缺",
    "ref": "10-15 15:00"
   }
  ]
