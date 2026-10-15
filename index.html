@@ -105,7 +105,6 @@
     <h1 id="title">外盘涨跌统计</h1>
     <div class="meta">
       <div class="time" id="genTime">加载中…</div>
-      <div id="modeDesc"></div>
     </div>
     <div class="lamps">
       <span class="lamp"><span class="dot" id="dotTx"></span><span id="lblTx">实时</span></span>
@@ -134,7 +133,7 @@
 
 <script>
 /* =====================================================================
-   外盘涨跌统计 · 前端 v2.6（2026-10-15）
+   外盘涨跌统计 · 前端 v2.7（2026-10-15）
    数据流：
      起始价/参考时间  ← data.json（GitHub Actions 云端按收盘节点定时生成，含复杂时段判定）
      最新价（准实时）  ← 新浪 hq.sinajs.cn，经自建 Cloudflare 双通道中转：
@@ -144,6 +143,9 @@
                        覆盖 6 个品种：原糖 / 棉花 / 马棕油 / 铁矿 / 日橡胶 / 美燃油，滞后约 8-20 秒
      最新价（实时）    ← 腾讯行情 qt.gtimg.cn 浏览器直连（其余 16 品种；美燃油备份走 fuHO 延时约 10 分钟）
      最新价（延时备份）← TradingView scanner（原糖/棉花/马棕油/日橡胶，新浪通道异常时兜底）
+     上证指数临时行    ← v2.7 新增：仅 10:15-10:30 与 11:30-13:30 两个窗口显示（商品 10:30/13:30 开盘前参考）。
+                       基准价 = 腾讯当日分时里 10:15 / 11:30 的价；实时价 = 腾讯 qt 行情（15 秒刷新）。
+                       其余时间不显示该行、也不产生任何请求。
    打开流程：本地缓存秒开 → 拉 data.json（起始价）→ 腾讯 15s + 新浪 15s + TV 60s 三通道轮询
    ===================================================================== */
 function fmt2(v, signed){
@@ -209,10 +211,39 @@ var TV_SYMS = {
 var TV_BASE = 'https://scanner.tradingview.com/symbol?symbol=';
 var TV_MS = 60000;        /* 全球源刷新间隔（数据本身 10-20 分钟延时，1 分钟查一次足够） */
 
+/* ---------- 上证指数临时行（v2.7）：仅 10:15-10:30 / 11:30-13:30 两个窗口显示 ---------- */
+/* 用途：商品 10:30 / 13:30 开盘前，参考 A 股大盘对 10:15 / 11:30 的涨跌做预判。
+   09:00-10:15 显示窗口 1：基准 = 当日分时 10:15 点；10:30 后隐藏。
+   11:30 显示窗口 2：基准 = 当日分时 11:30 点（上午收盘价）；11:30-13:00 A 股休市按 0 显示；13:30 后隐藏。
+   数据源：腾讯当日分时（web.ifzq.gtimg.cn，浏览器直连，实测 ACAO:*）+ 腾讯 qt 行情。 */
+var SSE_NAME = '上证指数';
+var SSE_TX_CODE = 'sh000001';
+var SSE_MINUTE_URL = 'https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=sh000001';
+var SSE_MS = 15000;       /* 窗口内检查/刷新间隔（毫秒） */
+
+function pad2(n){ return (n<10?'0':'') + n; }
+function todayKey(){
+  var d = new Date();
+  return '' + d.getFullYear() + pad2(d.getMonth()+1) + pad2(d.getDate());
+}
+function nowSec(){
+  var d = new Date();
+  return d.getHours()*3600 + d.getMinutes()*60 + d.getSeconds();
+}
+/* 窗口判定：10:15:00-10:29:59 → 基准 10:15；11:30:00-13:29:59 → 基准 11:30；其余返回 null（该行不显示） */
+function ssePhase(){
+  var t = nowSec();
+  if(t >= 36900 && t < 37800) return { key:'1015', label:'10:15' };
+  if(t >= 41400 && t < 48600) return { key:'1130', label:'11:30' };
+  return null;
+}
+
 /* ---------- 状态 ---------- */
-var state = { data:null, tx:null, txTime:'', txFail:0, sn:{}, snTime:'', snFail:0, gq:{} };
+var state = { data:null, tx:null, txTime:'', txFail:0, sn:{}, snTime:'', snFail:0, gq:{},
+              sse:null, sseLive:null, sseTryAt:0, sseErr:'' };
 var txBusy = false, jsonBusy = false, gqBusy = false, snBusy = false;
-var fastTimer = null, jsonTimer = null, gqTimer = null, snTimer = null;
+var sseBaseBusy = false, sseLiveBusy = false, sseActive = false;
+var fastTimer = null, jsonTimer = null, gqTimer = null, snTimer = null, sseTimer = null;
 
 function rowCode(r){
   if(!r) return null;
@@ -288,7 +319,6 @@ function render(){
   }else{
     document.getElementById('genTime').textContent = gen ? ('数据 ' + gen) : '加载中…';
   }
-  document.getElementById('modeDesc').textContent = gen ? ('起始价 ' + gen + ' 生成') : '';
   document.getElementById('refDesc').textContent = d.ref_desc || '';
   var tb = document.getElementById('tbody');
   tb.innerHTML = '';
@@ -305,6 +335,118 @@ function render(){
     tr.innerHTML = rowHtml({name:r.name, close:r.close, last:last, chg:chg, pct:pct, flag:r.flag, ref:r.ref});
     tb.appendChild(tr);
   }
+  /* 上证指数临时行（仅 10:15-10:30 / 11:30-13:30 出现，见 sseRowHtml） */
+  var sseHtml = sseRowHtml();
+  if(sseHtml){
+    var trSse = document.createElement('tr');
+    trSse.innerHTML = sseHtml;
+    tb.appendChild(trSse);
+  }
+}
+
+/* ---------- 上证指数临时行：基准价（腾讯分时） + 实时价（腾讯 qt） ---------- */
+/* 基准价：拉当日分时，取目标分钟点（10:15 / 11:30）的价；点还没生成时先用最近 3 分钟内兜底，60 秒后重试到精确点。
+   分时 date 与今天不一致（周末/节假日或无数据）则视为不可用。 */
+async function refreshSseBase(){
+  if(sseBaseBusy) return;
+  var ph = ssePhase();
+  if(!ph) return;
+  var st = state.sse;
+  if(st && st.date === todayKey() && st.key === ph.key && st.exact) return;   /* 已有精确基准，不必再拉 */
+  sseBaseBusy = true;
+  try{
+    var r = await fetch(SSE_MINUTE_URL, {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    var d = await r.json();
+    var blk = d && d.data && d.data[SSE_TX_CODE] && d.data[SSE_TX_CODE].data;
+    var arr = blk && blk.data;
+    if(!arr || !arr.length) throw new Error('no minute data');
+    var date = String(blk.date || '').replace(/-/g, '');
+    if(date !== todayKey()) throw new Error('stale date ' + date);   /* 分时仍是上一交易日 → 今天非交易日 */
+    var key = ph.key, lim = parseInt(key,10) - 3, base = null, exact = false;
+    for(var i=0;i<arr.length;i++){
+      var p = String(arr[i]).split(' '), tk = p[0] || '';
+      if(tk === key){ var v0 = parseFloat(p[1]); if(!isNaN(v0)){ base = v0; exact = true; } break; }
+      if(tk > key) break;                                            /* 已越过目标点（字符串比较，均为 4 位数字） */
+      if(tk.length === 4 && parseInt(tk,10) >= lim){
+        var v = parseFloat(p[1]);
+        if(!isNaN(v)) base = v;                                      /* 兜底：≤目标点的最近值 */
+      }
+    }
+    if(base == null || isNaN(base)) throw new Error('point not found');
+    state.sse = { date:date, key:key, label:ph.label, base:base, exact:exact };
+    state.sseErr = '';
+    render();
+  }catch(e){
+    state.sseErr = String(e);
+  }finally{
+    sseBaseBusy = false;
+  }
+}
+/* 实时价：与其余品种同一腾讯通道。11:30-13:00 A 股休市不拉，渲染时直接按基准显示 0。 */
+async function refreshSseLive(){
+  if(sseLiveBusy) return;
+  var ph = ssePhase();
+  if(!ph) return;
+  if(ph.key === '1130' && nowSec() < 46800){ state.sseLive = null; return; }   /* 13:00 前午休 */
+  sseLiveBusy = true;
+  try{
+    var r = await fetch(TX_URL + SSE_TX_CODE, {cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    var txt = await r.text();
+    var m = txt.match(/v_sh000001="([^"]*)"/);
+    if(!m) throw new Error('no match');
+    var fb = m[1].split('~');
+    var last = parseFloat(fb[3]);
+    if(isNaN(last) || last <= 0) throw new Error('bad price');
+    state.sseLive = { last:last };
+    render();
+  }catch(e){
+    /* 拉失败保留上一轮值；从未拉到则最新价显示 — */
+  }finally{
+    sseLiveBusy = false;
+  }
+}
+/* 行渲染：不在窗口 / 基准未就绪 → 返回 null（不显示该行） */
+function sseRowHtml(){
+  var ph = ssePhase();
+  if(!ph) return null;
+  var st = state.sse;
+  if(!st || st.date !== todayKey() || st.key !== ph.key) return null;
+  var base = st.base;
+  var pre13 = (ph.key === '1130') && (nowSec() < 46800);       /* 11:30-13:00 休市：按基准显示 0 */
+  var live = pre13 ? base : (state.sseLive ? state.sseLive.last : null);
+  var chg = null, pct = null;
+  if(live != null){ chg = live - base; pct = chg / base * 100; }
+  var refTxt = st.date.slice(4,6) + '-' + st.date.slice(6,8) + ' ' + st.label;
+  return '<td class="name">'+SSE_NAME+'</td>'+
+    '<td>'+fmt2(base)+'</td>'+
+    '<td class="'+(live==null?'miss':'')+'">'+fmt2(live)+'</td>'+
+    '<td class="'+cls(chg)+'">'+fmt2(chg,true)+'</td>'+
+    '<td class="'+cls(pct)+'">'+fmtPct(pct)+'</td>'+
+    '<td class="ref">'+refTxt+'</td>';
+}
+/* 定时检查（15 秒）：窗口内维护基准 + 实时价；退出窗口时清状态并重画一次（让行消失） */
+async function sseTick(){
+  var ph = ssePhase();
+  if(ph){
+    sseActive = true;
+    var st = state.sse;
+    var needBase = !(st && st.date === todayKey() && st.key === ph.key && st.exact);
+    if(needBase && Date.now() - (state.sseTryAt || 0) > 60000){
+      state.sseTryAt = Date.now();
+      refreshSseBase();                                          /* 60 秒节奏重试（首次进入/未精确时） */
+    }
+    refreshSseLive();
+  }else if(sseActive){
+    sseActive = false;
+    state.sse = null; state.sseLive = null;
+    render();
+  }
+}
+function scheduleSse(){
+  clearTimeout(sseTimer);
+  sseTimer = setTimeout(function(){ sseTick().then(scheduleSse); }, SSE_MS);
 }
 
 /* ---------- data.json：起始价（每小时云端更新） ---------- */
@@ -508,6 +650,8 @@ async function boot(){
   scheduleSina();                  /* ⑥ 之后每 15 秒刷一次新浪 */
   refreshGlobal();                 /* ⑦ 延时备份（TradingView，立即拉一次） */
   scheduleGlobal();                /* ⑧ 之后每 60 秒刷一次 */
+  sseTick();                       /* ⑨ 上证指数临时行：窗口内立即检查一次（窗口外零开销） */
+  scheduleSse();                   /* ⑩ 之后每 15 秒检查（含窗口进出判定） */
 }
 boot();
 jsonTimer = setInterval(loadJson, JSON_MS);   /* 每 60 秒检查一遍起始价是否更新 */
@@ -519,14 +663,17 @@ document.addEventListener('visibilitychange', function(){
     clearInterval(jsonTimer); jsonTimer = null;
     clearTimeout(gqTimer); gqTimer = null;
     clearTimeout(snTimer); snTimer = null;
+    clearTimeout(sseTimer); sseTimer = null;
   }else{
     loadJson();
     refreshTx();
     refreshSina();
     refreshGlobal();
+    sseTick();
     scheduleFast();
     scheduleSina();
     scheduleGlobal();
+    scheduleSse();
     if(!jsonTimer) jsonTimer = setInterval(loadJson, JSON_MS);
   }
 });
