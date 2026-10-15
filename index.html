@@ -128,20 +128,22 @@
     <div id="refDesc"></div>
     <div class="warn">不构成投资建议｜数据可能有延迟或错误，请谨慎参考</div>
   </div>
-  <div class="tip">打开页面即拉实时价（约 15 秒自动刷新）· 起始价每小时云端更新一轮</div>
-  <div class="tip">美燃油为延时行情（约 10-15 分钟）· 原糖 / 棉花 / 马棕油 / 铁矿 / 日橡胶无实时源，按小时更新</div>
+  <div class="tip">打开页面即拉最新价：新浪/腾讯双通道每 15 秒刷新 · 起始价每小时云端更新</div>
+  <div class="tip">全部品种均为准实时（约 8-20 秒）；通道异常时对应品种自动降级为延时备份（约 10-20 分钟）</div>
   <div class="tip">想强制刷新起始价？<a href="https://github.com/WingTrade/futures-calc/actions/workflows/fetch.yml" target="_blank" rel="noopener" style="color:#4A79B8;">点这里跑一轮</a>（约 2 分钟，跑完本页自动更新，无需其他操作）</div>
 </div>
 
 <script>
 /* =====================================================================
-   外盘涨跌统计 · 前端 v2（2026-10-15）
+   外盘涨跌统计 · 前端 v2.3（2026-10-15）
    数据流：
      起始价/参考时间  ← data.json（GitHub Actions 每小时云端生成，含复杂时段判定）
-     最新价          ← 腾讯行情 qt.gtimg.cn 浏览器直连（与新浪同数据源、同口径；
-                       新浪官方接口有防盗链+CORS限制，浏览器直接拉会被拦，
-                       腾讯接口带 CORS 头、无 Referer 校验，实测同秒数值一致）
-   打开流程：本地缓存秒开 → 拉 data.json（起始价）→ 拉腾讯（最新价，每 15 秒刷新）
+     最新价（准实时）  ← 新浪 hq.sinajs.cn，经自建 Cloudflare Worker 中转
+                       （浏览器直连新浪会被防盗链 403 + 无 CORS 头挡死，Worker 加 Referer 转发）
+                       覆盖 6 个品种：原糖 / 棉花 / 马棕油 / 铁矿 / 日橡胶 / 美燃油，滞后约 8-20 秒
+     最新价（实时）    ← 腾讯行情 qt.gtimg.cn 浏览器直连（其余 16 品种；美燃油备份走 fuHO 延时约 10 分钟）
+     最新价（延时备份）← TradingView scanner（原糖/棉花/马棕油/日橡胶，新浪通道异常时兜底）
+   打开流程：本地缓存秒开 → 拉 data.json（起始价）→ 腾讯 15s + 新浪 15s + TV 60s 三通道轮询
    ===================================================================== */
 function fmt2(v, signed){
   if(v==null) return '—';
@@ -181,15 +183,47 @@ var NAME2CODE = {
    美燃油：腾讯无 hf_HO 实时源，须用 fuHO（延时行情，约 10-15 分钟） */
 var TX_OVERRIDE = { 'hf_HO': 'fuHO' };
 
+/* ---------- 新浪准实时通道（Cloudflare Worker 中转）配置 ---------- */
+/* 浏览器直连 hq.sinajs.cn 必被 403（防盗链）+ 无 CORS 头，故走自建 Worker（代码见 worker.js）。
+   Worker 原样转发 GBK 字节，并带 Access-Control-Allow-Origin:* */
+var SINA_PROXY = 'https://forexfutures.jonsen.workers.dev/?list=';
+var SINA_MS = 15000;      /* 准实时刷新间隔（毫秒），与腾讯通道同节奏 */
+/* 走新浪通道升级为准实时的 6 个品种；其余品种腾讯直连已是实时，不必绕行 */
+var SINA_SYMS = { 'hf_RS':1, 'hf_CT':1, 'hf_FCPO':1, 'hf_FEF':1, 'hf_RSS3':1, 'hf_HO':1 };
+
+/* ---------- 全球源（TradingView，延时行情备份）---------- */
+/* 4 个品种（原糖/棉花/马棕油/日橡胶）的延时兜底源：正常时被新浪准实时通道覆盖，仅在新浪通道异常时显示。
+   新加坡铁矿不接 TV：TV 主连与起始价的新浪口径差 ~0.5%（疑换月差异）会让涨跌方向出错；铁矿已由新浪通道同源覆盖 */
+var TV_SYMS = {
+  'hf_RS':   'ICEUS:SB1!',    /* 美国原糖   ~10 分钟 */
+  'hf_CT':   'ICEUS:CT1!',    /* 美国棉花   ~10 分钟 */
+  'hf_FCPO': 'MYX:FCPO1!',    /* 马棕油     ~15 分钟 */
+  'hf_RSS3': 'TOCOM:TRB1!'    /* 日橡胶     ~20 分钟 */
+};
+var TV_BASE = 'https://scanner.tradingview.com/symbol?symbol=';
+var TV_MS = 60000;        /* 全球源刷新间隔（数据本身 10-20 分钟延时，1 分钟查一次足够） */
+
 /* ---------- 状态 ---------- */
-var state = { data:null, tx:null, txTime:'', txFail:0 };
-var txBusy = false, jsonBusy = false;
-var fastTimer = null, jsonTimer = null;
+var state = { data:null, tx:null, txTime:'', txFail:0, sn:{}, snTime:'', snFail:0, gq:{} };
+var txBusy = false, jsonBusy = false, gqBusy = false, snBusy = false;
+var fastTimer = null, jsonTimer = null, gqTimer = null, snTimer = null;
 
 function rowCode(r){
   if(!r) return null;
   var c = r.code || NAME2CODE[r.name] || null;   /* 新版优先 code 字段；旧版按名称兜底 */
   return c ? (TX_OVERRIDE[c] || c) : null;
+}
+function sinaCodeOf(r){
+  if(!r) return null;
+  return r.code || NAME2CODE[r.name] || null;    /* 取新浪体系代码（用于全球源匹配） */
+}
+function quoteOf(r){
+  var sc = sinaCodeOf(r);
+  if(sc && state.sn && state.sn[sc]) return state.sn[sc];   /* ① 新浪（准实时，6 品种，经 Worker 中转） */
+  var t = state.tx && state.tx[rowCode(r)];                 /* ② 腾讯（实时；美燃油为 fuHO 延时备份） */
+  if(t) return t;
+  if(sc && state.gq[sc]) return state.gq[sc];               /* ③ TradingView（延时，兜底） */
+  return null;
 }
 function setLamp(dotId, lblId, ok){
   document.getElementById(dotId).className = 'dot ' + (ok?'g':'r');
@@ -229,23 +263,24 @@ function render(){
   if(!d || !d.rows) return;
   document.getElementById('title').textContent = d.mode==='day' ? '对比15:00涨跌统计（日间）' : '隔夜涨跌统计';
   var gen = hhmm(d.generated_at);
-  if(state.tx && state.txTime){
-    document.getElementById('genTime').textContent = '实时 ' + state.txTime;
+  var tShow = state.txTime;                                     /* 头部时间取腾讯/新浪两通道中较新的时戳 */
+  if(state.snTime && (!tShow || state.snTime > tShow)) tShow = state.snTime;
+  if(tShow){
+    document.getElementById('genTime').textContent = '实时 ' + tShow;
   }else{
     document.getElementById('genTime').textContent = gen ? ('数据 ' + gen) : '加载中…';
   }
   document.getElementById('modeDesc').textContent = (d.mode_desc||'') + (gen ? (' · 起始价 ' + gen + ' 生成') : '');
-  setLamp('dotSina','lblSina', !!d.sina_ok);
   document.getElementById('refDesc').textContent = d.ref_desc || '';
   var tb = document.getElementById('tbody');
   tb.innerHTML = '';
   for(var i=0;i<d.rows.length;i++){
     var r = d.rows[i];
-    var t = (state.tx && rowCode(r)) ? state.tx[rowCode(r)] : null;
-    var last = (t && t.last!=null) ? t.last : r.last;
+    var q = quoteOf(r);                          /* 腾讯实时 或 TradingView 延时 */
+    var last = (q && q.last!=null) ? q.last : r.last;
     var chg = r.chg, pct = r.pct;
-    if(t && r.close!=null && last!=null && r.close>0){
-      chg = last - r.close;                    /* 前端即时重算：实时价 - 缓存起始价 */
+    if(q && r.close!=null && last!=null && r.close>0){
+      chg = last - r.close;                      /* 前端即时重算：最新价 - 起始价 */
       pct = chg / r.close * 100;
     }
     var tr = document.createElement('tr');
@@ -341,12 +376,102 @@ function scheduleFast(){
     refreshTx().then(scheduleFast);
   }, TX_MS);
 }
+/* ---------- 新浪通道：6 品种准实时（经 Cloudflare Worker 中转，打开即拉 + 15 秒刷新）---------- */
+async function refreshSina(){
+  if(snBusy) return;
+  if(!state.data || !state.data.rows) return;
+  var need = [], seen = {};
+  for(var i=0;i<state.data.rows.length;i++){
+    var c = sinaCodeOf(state.data.rows[i]);
+    if(c && SINA_SYMS[c] && !seen[c]){ seen[c] = 1; need.push(c); }
+  }
+  if(!need.length) return;
+  snBusy = true;
+  try{
+    var resp = await fetch(SINA_PROXY + need.join(','), {cache:'no-store'});
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
+    /* 响应字节为 GBK；数字/引号/逗号均为 ASCII，即使按 UTF-8 误读也不影响字段解析 */
+    var text = await resp.text();
+    var re = /hq_str_(hf_\w+)="([^"]*)"/g, m;
+    var sn = {}, maxT = '';
+    while((m = re.exec(text))){
+      var code = m[1], fb = m[2].split(',');
+      if(fb.length > 12 && fb[0]){
+        var last = parseFloat(fb[0]);       /* 逗号格式：f[0]=最新价、f[6]=时间（北京时间） */
+        if(isNaN(last)) continue;
+        var tstr = fb[6] || '';
+        sn[code] = { last:last, time:tstr };
+        if(tstr > maxT) maxT = tstr;
+      }
+    }
+    if(!Object.keys(sn).length) throw new Error('empty');
+    state.sn = sn;
+    if(maxT) state.snTime = maxT;
+    state.snFail = 0;
+    setLamp('dotSina','lblSina', true);
+    render();
+  }catch(e){
+    state.snFail++;
+    if(state.snFail >= 2) setLamp('dotSina','lblSina', false);
+    /* 失败时保留上一轮新浪值；若从未拉到，6 品种自动降级到腾讯/TradingView 备份源 */
+  }finally{
+    snBusy = false;
+  }
+}
+function scheduleSina(){
+  clearTimeout(snTimer);
+  snTimer = setTimeout(function(){
+    refreshSina().then(scheduleSina);
+  }, SINA_MS);
+}
+/* ---------- TradingView：延时品种最新价（打开即拉 + 每分钟刷新）---------- */
+async function refreshGlobal(){
+  if(gqBusy) return;
+  if(!state.data || !state.data.rows) return;
+  var need = [], seen = {};
+  for(var i=0;i<state.data.rows.length;i++){
+    var c = sinaCodeOf(state.data.rows[i]);
+    if(c && TV_SYMS[c] && !seen[c]){ seen[c] = 1; need.push(c); }
+  }
+  if(!need.length) return;
+  gqBusy = true;
+  try{
+    var results = await Promise.all(need.map(function(sc){
+      return fetch(TV_BASE + encodeURIComponent(TV_SYMS[sc]) + '&fields=close&no_404=true', {cache:'no-store'})
+        .then(function(r){ return r.ok ? r.json() : null; })
+        .then(function(o){
+          var v = o ? parseFloat(o.close) : NaN;
+          return isNaN(v) ? null : { c:sc, v:v };
+        })
+        .catch(function(){ return null; });
+    }));
+    var got = 0;
+    for(var j=0;j<results.length;j++){
+      if(results[j]){ state.gq[results[j].c] = { last: results[j].v }; got++; }
+    }
+    if(got) render();
+  }catch(e){
+    /* 静默失败：保留上一轮数据 */
+  }finally{
+    gqBusy = false;
+  }
+}
+function scheduleGlobal(){
+  clearTimeout(gqTimer);
+  gqTimer = setTimeout(function(){
+    refreshGlobal().then(scheduleGlobal);
+  }, TV_MS);
+}
 async function boot(){
   loadCache();
   render();                        /* ① 缓存秒开 */
   await loadJson();                /* ② 起始价（data.json） */
   refreshTx();                     /* ③ 最新价（腾讯，立即拉一次） */
-  scheduleFast();                  /* ④ 之后每 15 秒刷一次最新价 */
+  scheduleFast();                  /* ④ 之后每 15 秒刷一次腾讯 */
+  refreshSina();                   /* ⑤ 6 品种准实时（新浪 Worker，立即拉一次） */
+  scheduleSina();                  /* ⑥ 之后每 15 秒刷一次新浪 */
+  refreshGlobal();                 /* ⑦ 延时备份（TradingView，立即拉一次） */
+  scheduleGlobal();                /* ⑧ 之后每 60 秒刷一次 */
 }
 boot();
 jsonTimer = setInterval(loadJson, JSON_MS);   /* 每 60 秒检查一遍起始价是否更新 */
@@ -356,10 +481,16 @@ document.addEventListener('visibilitychange', function(){
   if(document.hidden){
     clearTimeout(fastTimer); fastTimer = null;
     clearInterval(jsonTimer); jsonTimer = null;
+    clearTimeout(gqTimer); gqTimer = null;
+    clearTimeout(snTimer); snTimer = null;
   }else{
     loadJson();
     refreshTx();
+    refreshSina();
+    refreshGlobal();
     scheduleFast();
+    scheduleSina();
+    scheduleGlobal();
     if(!jsonTimer) jsonTimer = setInterval(loadJson, JSON_MS);
   }
 });
