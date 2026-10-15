@@ -128,18 +128,20 @@
     <div id="refDesc"></div>
     <div class="warn">不构成投资建议｜数据可能有延迟或错误，请谨慎参考</div>
   </div>
-  <div class="tip">打开页面即拉最新价：新浪/腾讯双通道每 15 秒刷新 · 起始价每小时云端更新</div>
+  <div class="tip">打开页面即拉最新价：新浪/腾讯双通道每 15 秒刷新 · 起始价云端按收盘节点定时更新</div>
   <div class="tip">全部品种均为准实时（约 8-20 秒）；通道异常时对应品种自动降级为延时备份（约 10-20 分钟）</div>
   <div class="tip">想强制刷新起始价？<a href="https://github.com/WingTrade/futures-calc/actions/workflows/fetch.yml" target="_blank" rel="noopener" style="color:#4A79B8;">点这里跑一轮</a>（约 2 分钟，跑完本页自动更新，无需其他操作）</div>
 </div>
 
 <script>
 /* =====================================================================
-   外盘涨跌统计 · 前端 v2.4（2026-10-15）
+   外盘涨跌统计 · 前端 v2.5（2026-10-15）
    数据流：
-     起始价/参考时间  ← data.json（GitHub Actions 每小时云端生成，含复杂时段判定）
-     最新价（准实时）  ← 新浪 hq.sinajs.cn，经自建 Cloudflare Worker 中转
-                       （浏览器直连新浪会被防盗链 403 + 无 CORS 头挡死，Worker 加 Referer 转发）
+     起始价/参考时间  ← data.json（GitHub Actions 云端按收盘节点定时生成，含复杂时段判定）
+     最新价（准实时）  ← 新浪 hq.sinajs.cn，经自建 Cloudflare 双通道中转：
+                       ① Pages 直连：sina-hq.pages.dev（国内可直连，手机/户外无代理也可用）
+                       ② Worker 备用：workers.dev（需代理可达，兜底）
+                       （浏览器直连新浪会被防盗链 403 + 无 CORS 头挡死，中转加 Referer 转发）
                        覆盖 6 个品种：原糖 / 棉花 / 马棕油 / 铁矿 / 日橡胶 / 美燃油，滞后约 8-20 秒
      最新价（实时）    ← 腾讯行情 qt.gtimg.cn 浏览器直连（其余 16 品种；美燃油备份走 fuHO 延时约 10 分钟）
      最新价（延时备份）← TradingView scanner（原糖/棉花/马棕油/日橡胶，新浪通道异常时兜底）
@@ -183,10 +185,15 @@ var NAME2CODE = {
    美燃油：腾讯无 hf_HO 实时源，须用 fuHO（延时行情，约 10-15 分钟） */
 var TX_OVERRIDE = { 'hf_HO': 'fuHO' };
 
-/* ---------- 新浪准实时通道（Cloudflare Worker 中转）配置 ---------- */
-/* 浏览器直连 hq.sinajs.cn 必被 403（防盗链）+ 无 CORS 头，故走自建 Worker（代码见 worker.js）。
-   Worker 原样转发 GBK 字节，并带 Access-Control-Allow-Origin:* */
-var SINA_PROXY = 'https://forexfutures.jonsen.workers.dev/?list=';
+/* ---------- 新浪准实时通道（Cloudflare 中转）配置 ---------- */
+/* 浏览器直连 hq.sinajs.cn 必被 403（防盗链）+ 无 CORS 头，故走自建中转（原样转发 GBK 字节 + ACAO:*）。
+   双通道按序尝试：① Pages 主通道（pages.dev 国内可直连，无代理场景也可用）
+                   ② Worker 备用（workers.dev 需代理，兜底用） */
+var SINA_PROXIES = [
+  'https://sina-hq.pages.dev/?list=',
+  'https://forexfutures.jonsen.workers.dev/?list='
+];
+var SINA_TRY_TIMEOUT = 4000;   /* 单个中转通道的超时（毫秒）；超时即切下一通道 */
 var SINA_MS = 15000;      /* 准实时刷新间隔（毫秒），与腾讯通道同节奏 */
 /* 走新浪通道升级为准实时的 6 个品种；其余品种腾讯直连已是实时，不必绕行 */
 var SINA_SYMS = { 'hf_RS':1, 'hf_CT':1, 'hf_FCPO':1, 'hf_FEF':1, 'hf_RSS3':1, 'hf_HO':1 };
@@ -219,7 +226,7 @@ function sinaCodeOf(r){
 }
 function quoteOf(r){
   var sc = sinaCodeOf(r);
-  if(sc && state.sn && state.sn[sc]) return state.sn[sc];   /* ① 新浪（准实时，6 品种，经 Worker 中转） */
+  if(sc && state.sn && state.sn[sc]) return state.sn[sc];   /* ① 新浪（准实时，6 品种，经双通道中转） */
   var t = state.tx && state.tx[rowCode(r)];                 /* ② 腾讯（实时；美燃油为 fuHO 延时备份） */
   if(t) return t;
   if(sc && state.gq[sc]) return state.gq[sc];               /* ③ TradingView（延时，兜底） */
@@ -389,7 +396,19 @@ function scheduleFast(){
     refreshTx().then(scheduleFast);
   }, TX_MS);
 }
-/* ---------- 新浪通道：6 品种准实时（经 Cloudflare Worker 中转，打开即拉 + 15 秒刷新）---------- */
+/* ---------- 新浪通道：6 品种准实时（经 Cloudflare 双通道中转，打开即拉 + 15 秒刷新）---------- */
+/* 单通道拉取：成功返回文本；失败或超时抛错（由上层按序切换通道） */
+async function fetchSinaOnce(base, codes){
+  var ctl = new AbortController();
+  var tid = setTimeout(function(){ ctl.abort(); }, SINA_TRY_TIMEOUT);
+  try{
+    var resp = await fetch(base + codes, {cache:'no-store', signal:ctl.signal});
+    if(!resp.ok) throw new Error('HTTP '+resp.status);
+    return await resp.text();
+  }finally{
+    clearTimeout(tid);
+  }
+}
 async function refreshSina(){
   if(snBusy) return;
   if(!state.data || !state.data.rows) return;
@@ -401,10 +420,14 @@ async function refreshSina(){
   if(!need.length) return;
   snBusy = true;
   try{
-    var resp = await fetch(SINA_PROXY + need.join(','), {cache:'no-store'});
-    if(!resp.ok) throw new Error('HTTP '+resp.status);
+    /* 双中转通道按序尝试（Pages 主 → Worker 备），单通道 4 秒超时，全挂才判本轮失败 */
+    var text = null;
+    for(var pi=0; pi<SINA_PROXIES.length; pi++){
+      try{ text = await fetchSinaOnce(SINA_PROXIES[pi], need.join(',')); break; }
+      catch(e){ text = null; }
+    }
+    if(text == null) throw new Error('all proxies failed');
     /* 响应字节为 GBK；数字/引号/逗号均为 ASCII，即使按 UTF-8 误读也不影响字段解析 */
-    var text = await resp.text();
     var re = /hq_str_(hf_\w+)="([^"]*)"/g, m;
     var sn = {}, maxT = '';
     while((m = re.exec(text))){
