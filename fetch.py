@@ -1,7 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.4）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.7）
 ======================================================
+v1.7 更新（2026-10-15）：
+  - 新增白天两档参考时点（配套国内日盘作息）：10:15 档（10:15-11:30，含 10:15 休息段；
+    10:30 开盘后不切换、连续对比到 11:30）与 11:30 档（11:30-15:00，含午休段）。
+    仅交易日生效，非交易日回落 night。
+  - data.json 新增 title 字段（各档页面标题），前端优先使用（旧前端自动回落原逻辑）。
+  - 原油双档合并条件由「day 模式」放宽为「非 night 模式」（白天两档同样显示单行）；
+    夜盘双行时名称不再带「(23:00)/(02:30)」组标记（区分由"起始时间"列呈现）。
+  - 美原糖「起始时间」标签修正放宽到白天两档（mode != night 时均显示"最近时段收盘 01:00"，
+    与 v1.5 的 day 档口径一致）；马棕等其他品种维持名义档位时点显示。
+
 v1.6 更新（2026-10-15）：
   - rows 每行新增 code 字段（新浪 hf_ 代码，如 "hf_GC"），供网页端直连腾讯行情
     （qt.gtimg.cn）拉取实时最新价时做品种匹配。腾讯行情与新浪同数据体系、
@@ -377,11 +387,23 @@ def get_night_calendar():
 
 # ---------------- 参考时点判定（与 v1.7 一致） ----------------
 def decide_mode(now, trade_days):
+    """档位判定（v1.7 新增白天两档）：
+       day   = 15:00-23:00（参考今日 15:00）
+       m1015 = 10:15-11:30（参考今日 10:15；10:30 开盘后不切换，连续对比到 11:30）
+       m1130 = 11:30-15:00（参考今日 11:30，午休段起）
+       night = 其余（夜盘分组参考）
+       白天两档仅在交易日生效，非交易日回落 night。"""
     today = now.date().isoformat()
     t = now.hour * 60 + now.minute
-    if trade_days:
-        return 'day' if (today in trade_days and 15 * 60 <= t < 23 * 60) else 'night'
-    return 'day' if (now.weekday() < 5 and 15 * 60 <= t < 23 * 60) else 'night'
+    is_trade = (today in trade_days) if trade_days else (now.weekday() < 5)
+    if is_trade:
+        if 15 * 60 <= t < 23 * 60:
+            return 'day'
+        if 10 * 60 + 15 <= t < 11 * 60 + 30:
+            return 'm1015'
+        if 11 * 60 + 30 <= t < 15 * 60:
+            return 'm1130'
+    return 'night'
 
 def night_ref_point(group, now, trade_days, night_days):
     h, mi = GROUP_CLOSE[group]
@@ -462,6 +484,14 @@ def main():
             ref_map[g] = (dc, 'day')
         ref_map['IDX'] = (dc, 'day')
         ref_desc = '参考: 今日 15:00'
+    elif mode in ('m1015', 'm1130'):
+        # v1.7: 白天两档 —— 全组统一参考时点（与 15:00 档同构）
+        hh, mm = {'m1015': (10, 15), 'm1130': (11, 30)}[mode]
+        dc = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        for g in GROUPS:
+            ref_map[g] = (dc, 'day')
+        ref_map['IDX'] = (dc, 'day')
+        ref_desc = f'参考: 今日 {hh:02d}:{mm:02d}'
     else:
         for g in GROUPS:
             ref_map[g] = night_ref_point(g, now, trade_days, night_days)
@@ -527,9 +557,10 @@ def main():
     # 组装行
     rows = []
     for name, group, secid, sina_code in VARIETIES:
-        if mode == 'day' and name.endswith('(02:30)') and '原油' in name:
-            continue
-        if mode == 'day' and name.endswith('(23:00)') and '原油' in name:
+        if '原油' in name and mode != 'night' and name.endswith('(02:30)'):
+            continue   # 单行档（15:00 / 10:15 / 11:30）：原油只显示一行
+        if '原油' in name:
+            # 名称不带组标记；两行时的区分（23:00 / 02:30）由「起始时间」列呈现
             name = name.split('(')[0]
         ref_dt, _ = ref_map.get('IDX' if secid in INDEX_SECIDS else group, (None, None))
         ref_show = ref_dt
@@ -583,7 +614,7 @@ def main():
                     if c2 is not None:
                         close = c2
                         # 参考的准确时点 = 该日K次日的 01:00（北京），与日K数据保持一致（跨周末自动正确）
-                        if mode == 'day' and d_str:
+                        if mode != 'night' and d_str:
                             rd = datetime.strptime(d_str, '%Y-%m-%d') + timedelta(days=1)
                             ref_text = f'{rd:%m-%d} 01:00'
                 except Exception:
@@ -595,6 +626,17 @@ def main():
                         close = None
                 except Exception:
                     close = None
+            # v1.7: 分时路径下同步修正标签——原糖时段 15:30 → 次日 01:00，白天/day 档
+            #       实际取价笔为上一时段 01:00 收盘，标签同步为该真实时刻
+            if close is not None and mode != 'night' and ref_text is None and bars_ml:
+                _lb = None
+                for _dt, _c in bars_ml:
+                    if _dt <= ref_dt:
+                        _lb = _dt
+                    else:
+                        break
+                if _lb is not None and (ref_dt - _lb) > timedelta(hours=1):
+                    ref_text = f'{_lb:%m-%d %H:%M}'
             if close is None:
                 note = '缺'
         elif name == '日橡胶':
@@ -679,9 +721,13 @@ def main():
         })
 
     em_ok = em_snap_ok and kline_fail < 3
+    mode_title = {'day': '对比15:00涨跌统计（日间）',
+                  'm1015': '对比10:15涨跌统计',
+                  'm1130': '对比11:30涨跌统计'}.get(mode, '隔夜涨跌统计')
     data = {
         'generated_at': f'{now:%Y-%m-%d %H:%M}',
         'mode': mode,
+        'title': mode_title,
         'mode_desc': '日间（对比今日15:00）' if mode == 'day' else '隔夜',
         'ref_desc': ref_desc,
         'em_ok': em_ok,
