@@ -135,7 +135,7 @@
 
 <script>
 /* =====================================================================
-   外盘涨跌统计 · 前端 v2.3（2026-10-15）
+   外盘涨跌统计 · 前端 v2.4（2026-10-15）
    数据流：
      起始价/参考时间  ← data.json（GitHub Actions 每小时云端生成，含复杂时段判定）
      最新价（准实时）  ← 新浪 hq.sinajs.cn，经自建 Cloudflare Worker 中转
@@ -234,17 +234,29 @@ function hhmm(s){
   return s.length>=16 ? s.slice(11,16) : s;
 }
 
-/* ---------- 本地缓存：打开秒开 ---------- */
+/* ---------- 本地缓存：打开秒开（含上次实时值快照，防止打开瞬间闪回旧价） ---------- */
 function loadCache(){
   try{
     var s = localStorage.getItem(CACHE_KEY);
     if(!s) return;
     var o = JSON.parse(s);
     if(o && o.data && o.data.rows) state.data = o.data;
+    /* 仅当快照 2 小时内才恢复实时值；过旧可能跨交易时段，弃用走 data.json */
+    if(o && (Date.now() - (o.ts||0) < 7200000)){
+      if(o.sn) state.sn = o.sn;
+      if(o.tx) state.tx = o.tx;
+      if(o.txTime) state.txTime = o.txTime;
+      if(o.snTime) state.snTime = o.snTime;
+    }
   }catch(e){}
 }
 function saveCache(d){
-  try{ localStorage.setItem(CACHE_KEY, JSON.stringify({ts:Date.now(), data:d})); }catch(e){}
+  try{
+    localStorage.setItem(CACHE_KEY, JSON.stringify({
+      ts:Date.now(), data:d,
+      sn:state.sn, tx:state.tx, txTime:state.txTime, snTime:state.snTime
+    }));
+  }catch(e){}
 }
 
 /* ---------- 渲染 ---------- */
@@ -360,6 +372,7 @@ async function refreshTx(){
     state.txFail = 0;
     setLamp('dotTx','lblTx', true);
     render();
+    saveCache(state.data);   /* 实时值落盘：下次打开秒开用，不闪旧价 */
   }catch(e){
     state.txFail++;
     if(state.txFail >= 2) setLamp('dotTx','lblTx', false);
@@ -410,6 +423,7 @@ async function refreshSina(){
     state.snFail = 0;
     setLamp('dotSina','lblSina', true);
     render();
+    saveCache(state.data);   /* 实时值落盘：下次打开秒开用，不闪旧价 */
   }catch(e){
     state.snFail++;
     if(state.snFail >= 2) setLamp('dotSina','lblSina', false);
