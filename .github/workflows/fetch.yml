@@ -1,20 +1,32 @@
 name: fetch
+
 on:
   schedule:
-    - cron: '50 0,4,8,12 * * *'
-  workflow_dispatch:
+    # 只在「起始价切换节点」后几分钟跑，其余时间不跑（cron 为 UTC，北京 = UTC + 8）
+    - cron: '2 7 * * *'    # 北京 15:02 · 日盘收盘（15:00 节点）
+    - cron: '22 7 * * *'   # 北京 15:22 · 保险轮（15:02 若遇数据源延迟，本轮自动修正；数据无变化时不产生提交）
+    - cron: '2 15 * * *'   # 北京 23:02 · 夜盘普通品种收盘（23:00 节点）
+    - cron: '2 17 * * *'   # 北京 01:02（凌晨）· LME 有色收盘（01:00 节点）
+    - cron: '32 18 * * *'  # 北京 02:32（凌晨）· 贵金属收盘（02:30 节点）
+    - cron: '50 21 * * *'  # 北京 05:50（凌晨）· 美股日线定格（05:30 后）+ 夜间汇总兜底
+  workflow_dispatch:       # 手动触发：随时想看最新数据，Actions 页点 Run workflow，约 2 分钟后刷新网页即可
+
 permissions:
   contents: write
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: 拉取数据
         run: python fetch.py
+
       - name: 提交数据
         run: |
           git config user.name "github-actions[bot]"
