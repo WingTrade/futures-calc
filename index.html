@@ -7,35 +7,44 @@
 <style>
   :root{
     --header-bg:#1E3A5F; --up:#D6263B; --down:#0B8043; --zero:#555;
-    --miss:#999; --grid:#DDE3EC; --row-a:#fff; --row-b:#F5F8FC;
-    --name-a:#E9EEF6; --name-b:#DEE6F2; --text:#333;
+    --miss:#999; --grid:#DFE6EF; --row-a:#fff; --row-b:#F2F6FB;
+    --name-a:#E9EEF6; --name-b:#DDE5F1; --text:#333;
   }
   *{box-sizing:border-box; margin:0; padding:0;}
   body{
     font-family:"Microsoft YaHei","PingFang SC",-apple-system,sans-serif;
-    background:#f0f3f8; color:var(--text); padding:14px;
+    background:#eef2f7; color:var(--text); padding:6px;
     -webkit-font-smoothing:antialiased;
   }
-  .wrap{max-width:900px; margin:0 auto;}
+  .wrap{width:fit-content; max-width:100%; margin:0 auto;}
   .head{
-    background:var(--header-bg); color:#fff; border-radius:10px 10px 0 0;
-    padding:16px 18px; display:flex; align-items:center; justify-content:space-between;
-    flex-wrap:wrap; gap:8px;
+    background:var(--header-bg); color:#fff; border-radius:7px 7px 0 0;
+    padding:6px 10px; display:flex; align-items:center; justify-content:space-between;
+    flex-wrap:wrap; gap:4px;
+    contain:inline-size; width:100%;
   }
-  .head h1{font-size:20px; font-weight:700;}
-  .head .meta{font-size:13px; opacity:.92; text-align:right;}
-  .head .meta .time{font-size:15px; font-weight:600; color:#FFE08A;}
-  .lamps{display:flex; gap:14px; align-items:center; font-size:13px;}
-  .lamp{display:flex; align-items:center; gap:5px;}
-  .dot{width:9px; height:9px; border-radius:50%; display:inline-block;}
+  .head h1{font-size:13px; font-weight:700;}
+  .head .meta{font-size:11px; opacity:.92; text-align:right; line-height:1.35;}
+  .head .meta .time{font-size:12px; font-weight:600; color:#FFE08A;}
+  .lamps{display:flex; gap:9px; align-items:center; font-size:11px;}
+  .lamp{display:flex; align-items:center; gap:4px;}
+  .dot{width:7px; height:7px; border-radius:50%; display:inline-block;}
   .dot.g{background:#2ecc71;} .dot.r{background:#e74c3c;}
-  table{width:100%; border-collapse:collapse; background:#fff; font-size:15px;}
-  thead th{
-    background:var(--header-bg); color:#fff; font-weight:600; padding:11px 8px;
-    font-size:14px; position:sticky; top:0;
+  .block{
+    width:fit-content; max-width:100%; margin:0 auto; background:#fff;
+    border-radius:0 0 7px 7px; overflow:hidden;
   }
-  tbody td{padding:10px 8px; text-align:right; border-bottom:1px solid var(--grid);}
-  td.name{text-align:left; font-weight:600; color:var(--header-bg); padding-left:14px;}
+  table{border-collapse:collapse; font-size:12px;}
+  thead th{
+    background:var(--header-bg); color:#fff; font-weight:600; padding:3px 6px;
+    font-size:11px; white-space:nowrap;
+  }
+  tbody td{
+    padding:1px 6px; text-align:right; border-bottom:1px solid var(--grid);
+    line-height:1.25; white-space:nowrap;
+  }
+  tbody tr:last-child td{border-bottom:none;}
+  td.name{text-align:left; font-weight:600; color:var(--header-bg); padding-left:9px;}
   tr:nth-child(even) td{background:var(--row-b);}
   tr:nth-child(even) td.name{background:var(--name-b);}
   tr:nth-child(odd) td.name{background:var(--name-a);}
@@ -43,23 +52,22 @@
   .down{color:var(--down); font-weight:600;}
   .zero{color:var(--zero);}
   .miss{color:var(--miss);}
-  .ref{font-size:12px; color:#777; line-height:1.5;}
-  .ref .cur{color:#555;}
+  th.ref, td.ref{font-size:11px; color:#777; text-align:center; padding-left:4px; padding-right:4px;}
   .foot{
-    background:#fff; border-top:2px solid var(--grid); border-radius:0 0 10px 10px;
-    padding:12px 16px; font-size:12px; color:#999; line-height:1.7;
+    background:#fff; border-top:1px solid var(--grid); border-radius:0 0 7px 7px;
+    padding:5px 10px; font-size:11px; color:#999; line-height:1.5; margin-top:1px;
+    contain:inline-size; width:100%;
   }
   .foot .warn{color:#c0392b;}
-  .tip{
-    margin-top:10px; text-align:center; font-size:12px; color:#aaa;
+  .tip{margin-top:4px; text-align:center; font-size:11px; color:#aab; contain:inline-size; width:100%;}
+  @media (max-width:520px){
+    body{padding:4px;}
+    td{padding:1px 4px;}
+    .block{overflow-x:auto;}
   }
-  @media (max-width:600px){
-    body{padding:6px;}
-    table{font-size:13px;}
-    thead th{font-size:12px; padding:9px 4px;}
-    tbody td{padding:8px 4px;}
-    td.name{padding-left:6px; font-size:13px;}
-    .head h1{font-size:17px;}
+  @media (max-width:380px){
+    td{padding:1px 3px;}
+    td.name{padding-left:4px;}
   }
 </style>
 </head>
@@ -76,15 +84,18 @@
       <span class="lamp"><span class="dot" id="dotSina"></span><span id="lblSina">新浪</span></span>
     </div>
   </div>
-  <table>
-    <thead>
-      <tr>
-        <th style="text-align:left; padding-left:14px;">品种名称</th>
-        <th>收盘价</th><th>最新价</th><th>对比涨跌</th><th>涨跌幅</th><th>时间区间</th>
-      </tr>
-    </thead>
-    <tbody id="tbody"></tbody>
-  </table>
+  <div class="block">
+    <table>
+      <thead>
+        <tr>
+          <th style="text-align:left; padding-left:9px;">品种名称</th>
+          <th>起始价</th><th>最新价</th><th>对比涨跌</th><th>涨跌幅</th>
+          <th class="ref">起始时间</th>
+        </tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
   <div class="foot">
     <div id="refDesc"></div>
     <div class="warn">不构成投资建议｜数据可能有延迟或错误，请谨慎参考</div>
@@ -108,6 +119,17 @@ function cls(v){
   if(Math.abs(v)<0.005) return 'zero';
   return v>0?'up':'down';
 }
+var SHORT_NAMES = { '新加坡铁矿石': '新加坡铁矿' };
+function rowHtml(r){
+  var nm = SHORT_NAMES[r.name] || r.name;
+  var flag = r.flag ? ' ※' : '';
+  return '<td class="name">'+nm+'</td>'+
+    '<td class="'+(r.close==null?'miss':'')+'">'+fmt2(r.close)+'</td>'+
+    '<td class="'+(r.last==null?'miss':'')+'">'+fmt2(r.last)+'</td>'+
+    '<td class="'+cls(r.chg)+'">'+fmt2(r.chg,true)+'</td>'+
+    '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+flag+'</td>'+
+    '<td class="ref">'+(r.ref||'—')+'</td>';
+}
 function render(d){
   document.getElementById('title').textContent = d.mode==='day' ? '对比15:00涨跌统计（日间）' : '隔夜涨跌统计';
   document.getElementById('genTime').textContent = '更新于 ' + d.generated_at;
@@ -115,18 +137,12 @@ function render(d){
   setLamp('dotEm','lblEm', d.em_ok);
   setLamp('dotSina','lblSina', d.sina_ok);
   document.getElementById('refDesc').textContent = d.ref_desc || '';
-  const tb = document.getElementById('tbody');
+  var tb = document.getElementById('tbody');
   tb.innerHTML = '';
-  for(const r of d.rows||[]){
-    const tr = document.createElement('tr');
-    const flag = r.flag ? ' ※' : '';
-    tr.innerHTML =
-      '<td class="name">'+r.name+'</td>'+
-      '<td class="'+(r.close==null?'miss':'')+'">'+fmt2(r.close)+'</td>'+
-      '<td class="'+(r.last==null?'miss':'')+'">'+fmt2(r.last)+'</td>'+
-      '<td class="'+cls(r.chg)+'">'+fmt2(r.chg,true)+'</td>'+
-      '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+flag+'</td>'+
-      '<td class="ref"><span>'+(r.ref||'—')+'</span><br><span class="cur">'+(d.generated_at||'')+'</span></td>';
+  var rows = d.rows || [];
+  for(var i=0;i<rows.length;i++){
+    var tr = document.createElement('tr');
+    tr.innerHTML = rowHtml(rows[i]);
     tb.appendChild(tr);
   }
 }
@@ -136,7 +152,7 @@ function setLamp(dotId, lblId, ok){
 }
 async function load(){
   try{
-    const r = await fetch('data.json?t='+Date.now(), {cache:'no-store'});
+    var r = await fetch('data.json?t='+Date.now(), {cache:'no-store'});
     if(!r.ok) throw new Error('HTTP '+r.status);
     render(await r.json());
   }catch(e){

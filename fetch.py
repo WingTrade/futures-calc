@@ -1,7 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.1）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.3）
 ======================================================
+v1.3 更新（2026-10-15）：
+  - 美股指数（标普/道指/纳指）口径修正为"最近一个收盘价 vs 更早一个收盘价"
+    （两个收盘价相差 1 个交易日，如 10-14 收 vs 10-13 收），不再用当日开盘价做基准；
+    "收盘价"列=更早一个收盘价，"最新价"列=最近一个收盘价。与行情站常见口径一致。
+  - 移除 富时A50：该品种仅东财有源（现被限流），新浪/腾讯/雪球等均无覆盖，
+    按用户指示删除（页面 25 个品种全部不依赖东财，稳定性拉满）。
+  - 美股指数不再使用 ES/YM/NQ 期货快照（sina_code 已清零），日K 接口失败时显示"缺"。
+
+v1.2 更新（2026-10-15）：
+  - 修复"星号（※）大偏差"根因：参考价（新浪）与现价（东财）跨源混用，
+    两源的连续/主力合约选择不一致（天然气差 18%、豆粉差 5%，已用腾讯源交叉验证）。
+    现改为：现价也优先新浪快照（与参考价同源），东财仅作兜底；两源差 >0.5% 仍标 ※。
+  - 美股指数（标普/道指/纳指）改为"最近一根已收盘日线"口径：
+    展示该日线的 开盘价→收盘价 对比涨跌，全天不随盘中波动
+    （如美东 10-14 日线：北京 10-14 晚开盘 → 10-15 早收盘，收盘后即定格）。
+    "收盘价"列=该日线开盘价（对比基准），"最新价"列=该日线收盘价，
+    时间区间列标注如 "10-14美"。数据源：新浪美股日K（.INX/.DJI/.IXIC）。
+  - 富时A50 维持原逻辑（新浪无此品种数据源，仅东财有）。
+
 v1.1 更新（2026-10-15）：
   - 新增新浪"当日分时"数据源（GlobalFuturesService.getGlobalFuturesMinLine）
     作为参考价主源。原因：东财 K 线接口对云端（尤其 GitHub 海外 IP）限流严重，
@@ -10,7 +29,7 @@ v1.1 更新（2026-10-15）：
   - 参考价优先级：新浪分时（主）→ 东财 K 线（兜底）。
   - 当前价优先级：东财快照 → 新浪快照 → 新浪分时末根（新增第三兜底）。
   - 美铜（hf_HG）新浪分时价格需美分→美元换算（与快照换算保持同口径）。
-  - 其余逻辑（品种表、模式判定、日历、输出格式）与 v1.0 完全一致。
+  - 伦铅接入新浪源（symbol=PBD）；美原糖加日K 昨收兜底（15:30 开盘后旧时段数据被顶掉）。
 
 v1.0（2026-10-14）：
   从本机版 v1.7 移植核心逻辑：时间统一 UTC+8；结果直接写 data.json；
@@ -40,7 +59,7 @@ VARIETIES = [
     ('伦锡',        'M01',   '109.LTNT',   'hf_SND'),
     ('美铜',        'M01',   '101.HG00Y',  'hf_HG'),
     ('伦铜',        'M01',   '109.LCPT',   'hf_CAD'),
-    ('伦铅',        'M01',   '109.LLDT',   None),
+    ('伦铅',        'M01',   '109.LLDT',   'hf_PBD'),  # v1.1: 新浪伦铅代码 PBD
     ('美燃油',       'M23',   '102.HO00Y',  'hf_HO'),
     ('美国天然气',    'M23',   '102.NG00Y',  'hf_NG'),
     ('美大豆',       'M23',   '103.ZS00Y',  'hf_S'),
@@ -51,14 +70,15 @@ VARIETIES = [
     ('马棕油',       'M23',   '110.MPM00Y', 'hf_FCPO'),
     ('新加坡铁矿石',  'M23',   None,         'hf_FEF'),
     ('日橡胶',       'M23',   '111.JRU00Y', 'hf_RSS3'),
-    ('富时A50',      'M23',   '100.XIN9',   None),
-    ('标准普尔',     'M23',   '100.SPX',    'hf_ES'),   # v1.1: 新浪兜底用标普期货
-    ('道琼工业',     'M23',   '100.DJIA',   'hf_YM'),   # v1.1: 新浪兜底用道指期货
-    ('纳斯达克',     'M23',   '100.NDX',    'hf_NQ'),   # v1.1: 新浪兜底用纳指期货
+    ('标准普尔',     'M23',   '100.SPX',    None),   # v1.3: 走美股日K口径
+    ('道琼工业',     'M23',   '100.DJIA',   None),   # v1.3: 走美股日K口径
+    ('纳斯达克',     'M23',   '100.NDX',    None),   # v1.3: 走美股日K口径
 ]
 GROUP_CLOSE = {'M23': (23, 0), 'M01': (1, 0), 'M0230': (2, 30)}
 GROUPS = ['M23', 'M01', 'M0230']
-INDEX_SECIDS = {'100.XIN9', '100.SPX', '100.DJIA', '100.NDX'}
+INDEX_SECIDS = {'100.SPX', '100.DJIA', '100.NDX'}
+# v1.2: 美股指数 → 新浪美股日K symbol（展示"最近一根已收盘日线"的开盘→收盘）
+US_INDEX_MAP = {'100.SPX': '.INX', '100.DJIA': '.DJI', '100.NDX': '.IXIC'}
 
 # ---------------- HTTP ----------------
 SINA_HEADERS = {'Referer': 'https://finance.sina.com.cn',
@@ -238,6 +258,51 @@ def sina_fef_dailyk():
     m = re.search(r'\((\[.*\])\)', txt, re.S)
     return json.loads(m.group(1)) if m else []
 
+def sina_dailyk_last_close(symbol):
+    """v1.1: 新浪日K最后一根收盘价（美原糖"开盘点效应"兜底用）"""
+    u = ('https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20d=/'
+         f'GlobalFuturesService.getGlobalFuturesDailyKLine?symbol={symbol}')
+    txt = http_get(u, SINA_HEADERS)
+    m = re.search(r'\((\[.*\])\)', txt, re.S)
+    if not m:
+        return None
+    arr = json.loads(m.group(1))
+    if not arr:
+        return None
+    try:
+        return float(arr[-1]['close'])
+    except (ValueError, KeyError, TypeError):
+        return None
+
+def us_index_daily_bars(symbol, now, n=2):
+    """v1.3: 取最近 n 根【已收盘】美股指数日线 → [(日期str, 收盘价), ...]（时间升序，新的在后）。
+    已收盘判据：日线日期(美东)的次日北京 05:30 之后（覆盖夏/冬令时收盘时间差）。"""
+    u = ('https://stock2.finance.sina.com.cn/usstock/api/jsonp.php/var%20d=/'
+         f'US_MinKService.getDailyK?symbol={symbol}')
+    txt = http_get(u, SINA_HEADERS)
+    m = re.search(r'\((\[.*\])\)', txt, re.S)
+    if not m:
+        return []
+    try:
+        arr = json.loads(m.group(1))
+    except Exception:
+        return []
+    if not isinstance(arr, list):
+        return []
+    out = []
+    for k in reversed(arr):
+        try:
+            d = datetime.strptime(k['d'], '%Y-%m-%d')
+            c = float(k['c'])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if now >= d + timedelta(days=1, hours=5, minutes=30):
+            out.append((k['d'], c))
+            if len(out) >= n:
+                break
+    out.reverse()
+    return out
+
 def fef_ref_from_dailyk(ref_dt):
     dk = sina_fef_dailyk()
     if not dk or ref_dt is None:
@@ -367,12 +432,10 @@ def main():
             ref_map[g] = night_ref_point(g, now, trade_days, night_days)
         ref_map['IDX'] = index_ref_point(now, trade_days)
         parts = []
-        idx_dt = ref_map['IDX'][0]
-        parts.append(f'股指15:00→{idx_dt:%m-%d %H:%M}' if idx_dt else '股指:缺')
         for g in GROUPS:
             dt, _ = ref_map[g]
             parts.append(f'{GROUP_CLOSE[g][0]:02d}:{GROUP_CLOSE[g][1]:02d}→{dt:%m-%d %H:%M}' if dt else f'{g}:缺')
-        ref_desc = '参考(股指15:00/有色01:00/贵金属02:30/其他23:00): ' + '  '.join(parts)
+        ref_desc = '参考(有色01:00/贵金属02:30/其他23:00): ' + '  '.join(parts)
     print(f'模式: {mode}')
 
     # 当前价
@@ -435,20 +498,23 @@ def main():
             name = name.split('(')[0]
         ref_dt, _ = ref_map.get('IDX' if secid in INDEX_SECIDS else group, (None, None))
         ref_show = ref_dt
+        ref_text = None   # v1.2: 特判品种直接给出 ref 文本（美股指数等）
         sym = (sina_code[3:] if sina_code.startswith('hf_') else sina_code) if sina_code else None
         bars_ml = ml_by_sym.get(sym, []) if sym else []
 
         last, flag = None, False
-        if secid and secid.split('.')[-1] in em_map:
-            last = em_map[secid.split('.')[-1]]['last']
+        # v1.2: 新浪快照优先（与参考价同源，避免跨源合约口径差产生假涨跌）；东财兜底
         if sina_code and sina_code in sina_map:
-            s_last = sina_map[sina_code]['last']
+            last = sina_map[sina_code]['last']
+        if secid and secid.split('.')[-1] in em_map:
+            em_last = em_map[secid.split('.')[-1]]['last']
             if last is None or (isinstance(last, (int, float)) and last <= 0):
-                last = s_last
-            elif last is not None and s_last and abs(last - s_last) / s_last > 0.005:
+                last = em_last
+            elif em_last and isinstance(last, (int, float)) and last > 0 \
+                    and abs(last - em_last) / last > 0.005:
                 flag = True
         if last is None and bars_ml:
-            last = bars_ml[-1][1]   # v1.1: 两个快照源都缺时，用新浪分时末根
+            last = bars_ml[-1][1]   # 两个快照源都缺时，用新浪分时末根
 
         close, note = None, ''
         if ref_dt is None:
@@ -469,6 +535,29 @@ def main():
                     close = None
             if close is None:
                 note = '缺'
+        elif name == '美原糖':
+            # v1.1: 原糖时段 15:30 开盘后面临"开盘点效应"（旧时段数据被顶掉，
+            # 拿不到 15:00 参考点）→ 用新浪日K 昨交易日收盘兜底（= 今晨时段收盘价）
+            if bars_ml:
+                try:
+                    close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                                                    now=now, allow_stale=True)
+                except Exception:
+                    close = None
+            if close is None:
+                try:
+                    close = sina_dailyk_last_close('RS')
+                except Exception:
+                    close = None
+            if close is None and secid:
+                try:
+                    close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
+                    if st != 'ok':
+                        close = None
+                except Exception:
+                    close = None
+            if close is None:
+                note = '缺'
         elif name == '新加坡铁矿石':
             if ref_dt is not None:
                 try:
@@ -484,20 +573,21 @@ def main():
             if close is None:
                 note = '缺'
         elif secid:
-            if secid in INDEX_SECIDS:
-                # 指数：保持东财现货指数优先（原口径），新浪期货分时兜底（v1.1）
+            if secid in US_INDEX_MAP:
+                # v1.3: 美股指数（标普/道指/纳指）= 最近一个收盘价 vs 更早一个收盘价
+                # （两个收盘价相差 1 个交易日；全天固定，不随盘中波动）
                 try:
-                    close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
-                    if st != 'ok':
-                        close = None
+                    bars_us = us_index_daily_bars(US_INDEX_MAP[secid], now, 2)
                 except Exception:
-                    close = None
-                if close is None and bars_ml:
-                    try:
-                        close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
-                                                        now=now, allow_stale=True)
-                    except Exception:
-                        close = None
+                    bars_us = []
+                if len(bars_us) >= 2:
+                    (d_prev, c_prev), (d_last, c_last) = bars_us
+                    close, last = c_prev, c_last  # "收盘价"列=更早一个收盘价，"最新价"列=最近一个收盘价
+                    ref_text = f'{d_last[5:]}美'   # 如 "10-14美"
+                    flag = False
+                    note = ''
+                else:
+                    last, note = None, '缺'
             else:
                 # 商品：新浪当日分时优先（云端稳定），东财 K 线兜底（v1.1）
                 if bars_ml:
@@ -523,7 +613,7 @@ def main():
         rows.append({
             'name': name, 'close': close, 'last': last, 'chg': chg, 'pct': pct,
             'flag': flag, 'note': note,
-            'ref': f'{ref_show:%m-%d %H:%M}' if ref_show else None,
+            'ref': ref_text if ref_text is not None else (f'{ref_show:%m-%d %H:%M}' if ref_show else None),
         })
 
     em_ok = em_snap_ok and kline_fail < 3
