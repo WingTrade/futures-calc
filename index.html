@@ -291,10 +291,10 @@ function loadCache(){
     if(o && (Date.now() - (o.ts||0) < 7200000)){
       if(o.sn) state.sn = o.sn;
       if(o.tx) state.tx = o.tx;
-      if(o.txTime) state.txTime = o.txTime;
-      if(o.txDate) state.txDate = o.txDate;
-      if(o.snTime) state.snTime = o.snTime;
-      if(o.snDate) state.snDate = o.snDate;
+      /* v2.8: 时间戳必须带日期（txDate/snDate）才恢复 —— 旧版缓存没有日期字段，
+         恢复后会在打开瞬间闪现"实时 22:59:57"这类跨日误判值，等首个接口返回才被修正 */
+      if(o.txTime && o.txDate){ state.txTime = o.txTime; state.txDate = o.txDate; }
+      if(o.snTime && o.snDate){ state.snTime = o.snTime; state.snDate = o.snDate; }
     }
   }catch(e){}
 }
