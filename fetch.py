@@ -1,7 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.13）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.15）
 ======================================================
+  - 换月检测补第二通道（v1.15，采纳同行评审）：
+      · v1.14 只查【最新价】是否跑出当段分时表区间 —— 覆盖"分时表与快照切合约不同步"的瞬间；
+        但真实事故（10-16 美燃油）不是这样：两个源**都已切到新合约**，失真的是【起始价】
+        —— 它跨过换月线后被"续接继承"钉成了老合约价（close=4.834 / last=4.596 / 昨结 4.654），
+        所以每轮都不触发。经复核，该案例属实。
+      · 新增通道2 `rollover_suspect_close()`：起始价跑出当段表区间、且明显偏离昨结算。
+        双阈值分级：偏离 >= 2.5% → 自动修正（roll='fix'）；1.5%~2.5% → 只记录嫌疑
+        （roll='watch'，不动数值，避免把"跨时段继承的正确值"改错）。留痕字段：roll / roll_gap。
+      · 新增 ROLLOVER_EXCLUDE：日橡胶 / 新加坡铁矿石 / 伦敦银现货 不参与通道2
+        （它们的起始价有专门来源，不是当段分时表）。
+
   - 换月检测判据重写（v1.14）：
       · 新判据：**最新价是否跑到【当段分时表】的价格区间之外**（±0.5% 容差）。
         同一段分时表必然是同一个合约 → 最新价理应落在它的 [min,max] 内；
@@ -10,7 +21,7 @@
         "低>开"、伦铝 10-09 那根"高<开"），拿它当区间不可靠；而且"最近 2 根"
         会把换月前那根【老合约】包进来、把区间撑宽 → 系统性漏检（回测 2/4 漏检）。
       · 新增手工覆盖表 ROLLOVER_OVERRIDE（自动检测失灵时按品种强制按换月处理）。
-      · 修正动作不变：参考价 := 昨结算；起始时间列标「昨结 换月」。
+      · 修正动作不变：参考价 := 昨结算；起始时间列标「换月」。
       · 保护：分时表点数 < 3、区间幅度 < 0.2%、或表末根距今 > 30 分钟（时段已滚动）时不判。
 
 v1.13 更新（2026-10-16 · 海鸥工作区）：
@@ -169,6 +180,15 @@ NAME_ALIAS_MAP = {
 # v1.14: 手工换月覆盖表 {品种名: True} —— 自动检测失灵时，把品种名填进来即可强制按换月处理
 #   （基准 := 昨结算，起始时间列标「昨结 换月」）。
 ROLLOVER_OVERRIDE = {}
+
+# v1.15: 明确【不参与】"起始价换月检测"的品种 —— 它们的起始价有专门来源，不是当段分时表：
+#   日橡胶（day 档取当天日K收盘价）、新加坡铁矿石（可能走日K兜底）、伦敦银现货（可能走 5 日线兜底）。
+#   少了这张表，它们会被误判成换月。
+ROLLOVER_EXCLUDE = {
+    '日橡胶': True,
+    '新加坡铁矿石': True,
+    '伦敦银现货': True,
+}
 
 VARIETIES = [
     ('WTI原油(23:00)',    'M23',   '102.CL00Y',  'hf_CL'),
@@ -441,6 +461,43 @@ def rollover_suspect(bars, last, now, tol=0.005, min_span=0.002, max_age_min=30)
     if lo * (1 - tol) <= last <= hi * (1 + tol):
         return False, ''
     return True, '最新价 %s 落在分时表区间 [%s, %s] 之外' % (last, lo, hi)
+
+def rollover_suspect_close(bars, close, ps, exclude=False,
+                           tol=0.005, min_span=0.002, fix_pct=0.025, watch_pct=0.015):
+    """v1.15: 【起始价 close】的换月嫌疑判定 —— 覆盖"参考价跨换月线被继承钉住"这一真实机制。
+
+    为什么要补这条（v1.14 的缺口）：
+      v1.14 只检查【最新价】是否跑出当段分时表区间，覆盖的是"分时表与快照切合约不同步"的瞬间。
+      但真实事故（2026-10-16 美燃油）不是这样：表和新快照**都已经切到新合约**，
+      失真的是【起始价】—— 它跨过换月线后被"续接继承"机制钉成了老合约价
+      （close=4.834 老合约、last=4.596 新合约、昨结 ps=4.654），于是每轮都不触发。
+
+    close 正常时有三种来源，都不该"既跑出当段表区间、又远离当前合约的昨结算"：
+      · 取自当段分时表 → 必在区间内；
+      · 特判规则（日胶日K / 铁矿 / 银现货 5 日线）→ 这些品种已在 ROLLOVER_EXCLUDE 里排除；
+      · 跨时段继承 → 继承的是【同一合约】的历史价，与昨结算的差就是真实隔夜波动（通常 <1.5%）。
+    只有"继承来的老合约价"会同时满足：跑出区间 + 明显远离昨结算。
+
+    双阈值分级（避免把正确的继承值改错）：
+      · 偏离 >= 2.5% → 'fix'   自动修正（高置信度，如美燃油案例 3.87%）
+      · 偏离 1.5%~2.5% → 'watch' 只记录嫌疑、不动数值（供观察，零风险）
+    返回 (级别, 偏离比例, 说明文字)。"""
+    if exclude or not bars or close is None or ps is None or ps <= 0 or len(bars) < 3:
+        return None, None, ''
+    lo = min(p for _dt, p in bars)
+    hi = max(p for _dt, p in bars)
+    if hi <= 0 or (hi - lo) / hi < min_span:
+        return None, None, ''          # 区间过窄 → 不可靠
+    if lo * (1 - tol) <= close <= hi * (1 + tol):
+        return None, None, ''          # 起始价就在当段区间内 → 正常
+    gap = abs(close - ps) / ps
+    if gap >= fix_pct:
+        return 'fix', gap, '起始价 %s 跑出分时表区间 [%s, %s] 且偏离昨结 %s 达 %.2f%%' % (
+            close, lo, hi, ps, gap * 100)
+    if gap >= watch_pct:
+        return 'watch', gap, '起始价 %s 跑出分时表区间 [%s, %s]、偏离昨结 %.2f%%（只记录不发动作）' % (
+            close, lo, hi, gap * 100)
+    return None, None, ''
 
 def sina_dailyk_highlow_range(symbol, n=2):
     """v1.9: 取最近 n 根日K的 [min(low), max(high)]，供换月检测的区间校验用。
@@ -1026,31 +1083,55 @@ def main():
     #   ② 参考价不在最近 2 根日K的 [min(low), max(high)] 区间内（±0.5% 容差）。
     # 修正：参考价 := 昨结；ref := '昨结'（页面"起始时间"列显示该标注）；note := '换月'。
     month_fix = 0
+    month_watch = 0
     for row in rows:
         code = row.get('code')
         if not code or row.get('close') is None:
             continue
-        # v1.14：判据改为"分时表同段一致性"（不再看日K，也不再依赖 2% 阈值）
         sym = code[3:] if code.startswith('hf_') else code
-        suspect, why = rollover_suspect(ml_by_sym.get(sym) or [], row.get('last'), now)
-        if not suspect and row['name'] in ROLLOVER_OVERRIDE:
-            suspect, why = True, '手工覆盖表指定'
+        bars_row = ml_by_sym.get(sym) or []
         ps = (sina_map.get(code) or {}).get('prev_settle')
-        if not suspect or not ps or ps <= 0:
+
+        # 通道1（v1.14）：最新价跑出当段分时表区间 → 两源切合约不同步
+        suspect, why = rollover_suspect(bars_row, row.get('last'), now)
+        level = 'fix' if suspect else None
+
+        # 通道2（v1.15）：起始价跑出区间 + 明显偏离昨结 → 跨换月线被继承钉住
+        if level != 'fix':
+            lv2, gap2, why2 = rollover_suspect_close(
+                bars_row, row.get('close'), ps,
+                exclude=bool(ROLLOVER_EXCLUDE.get(row['name'])))
+            if lv2:
+                level, why = lv2, why2
+                row['roll_gap'] = round(gap2 * 100, 2)
+
+        # 手工覆盖
+        if not level and row['name'] in ROLLOVER_OVERRIDE:
+            level, why = 'fix', '手工覆盖表指定'
+
+        if level == 'watch':
+            row['roll'] = 'watch'      # 只留痕，不动数值（零风险观察档）
+            month_watch += 1
+            print('换月观察: %s（%s）' % (row['name'], why))
+            continue
+        if level != 'fix':
+            continue
+        if not ps or ps <= 0:
             continue
         close = row['close']
         row['close'] = ps
-        row['ref'] = '昨结 换月'
+        row['ref'] = '换月'   # v1.15.1: 用户要求——「起始时间」列只显示"换月"两个字
         row['note'] = '换月'
         row['ref_actual'] = None   # v1.10: "昨结算"不对应任何一笔分时，说明字段置空
         row['gap_min'] = None
+        row['roll'] = 'fix'
         if row['last'] is not None:
             row['chg'] = row['last'] - ps
             row['pct'] = row['chg'] / ps * 100
         month_fix += 1
         print(f"换月修正: {row['name']} 参考价 {close} -> 昨结 {ps}（{why}）")
-    if month_fix:
-        print(f'换月检测: {month_fix} 行已修正')
+    if month_fix or month_watch:
+        print(f'换月检测: {month_fix} 行已修正, {month_watch} 行只记录')
     else:
         print('换月检测: 未发现疑似换月失真')
 
