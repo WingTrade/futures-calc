@@ -1,7 +1,43 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.9.2）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.13）
 ======================================================
+v1.13 更新（2026-10-16 · 海鸥工作区）：
+  - 美原糖改为与所有品种统一口径：**基准 = 国内 15:00 收盘时刻的价**。
+    原糖 15:00 那一刻没有成交（它 15:30 才开盘）→ day 档取"15:00 之后的第一笔"（≈它今天开盘价），
+    时间跨度与其他品种一致；不再退到今晨 01:00 的收盘价（跨 14 小时空档），也不再走日K。
+    分时表滚出该笔时由 v1.8 继承机制按同 ref 顶住。
+
+v1.12 更新（2026-10-16 · 海鸥工作区）：
+  - 美原糖基准修正（用户口径）：基准取【国内对应品种最近一次收盘时刻】的价，不跟外盘自己的收盘走。
+    国内糖（郑糖）收盘时刻：日盘 15:00、夜盘 23:00；原糖自身时段 15:30 → 次日 01:00，
+    所以白档（10:15/11:30/15:00）它一律没有价 → 统一退到"最近一个已收盘的 23:00"。
+    **删掉**原来"退到它自己 01:00 收盘的日K价"那条路径（那是外盘自己的收盘时刻，不是国内的，用户否掉）。
+    原糖在分时表取不到时由 v1.8 继承机制按同 ref 顶住。
+    记住这条总口径：**基准 = 国内最近一次对应品种收盘时刻的价**；只有外盘在那个时刻已经收盘
+    （如日胶 14:50 收、节点 15:00）才用它自己的收盘价顶上。
+  - 品种改名（用户要求，只改显示名，新浪/东财代码一律不动）：
+      美黄豆粉 → 美豆粕、美黄豆油 → 美豆油、美国棉花 → 美棉花、美国天然气 → 美天然气
+    前端匹配表（NAME2CODE）已同步。改名后第一轮会与上一版名字对不上，
+    等于放弃一次继承机会；若恰逢"该品种本轮取不到价"，会显示一次"缺"，下一轮即恢复。
+
+v1.11 更新（2026-10-16 · 海鸥工作区）：
+  - 日橡胶基准修正：day 档（15:00 基准）改用"今天日K那根的收盘价"（= 日盘 14:50 收盘价）。
+    该品种 14:50 收盘且成交极稀疏，分时表在收盘前常已无成交（实测最后一笔只到 14:11），
+    原规则会取到 14:11 的价；而日K"今天"那根的 close 才是真实收盘价（夜盘 16:00 开盘后也不变）。
+    「起始时间」列随之如实显示 14:50。仅此一品种、仅 day 档改动，其余数值口径不变。
+
+v1.10 更新（2026-10-16 · 海鸥工作区）：
+  - 新增两个【说明性】字段，数值口径零改动（close/last/chg/pct 与 v1.9.2 完全一致）：
+      ref_actual = 该行基准价实际取自哪一笔分时的时刻，如 "10-16 10:23"
+      gap_min    = 该笔时刻与本档位标称节点相差的分钟数，如 67
+    背景：稀疏品种（美豆粕 / 伦锡 / 伦铅 / 天然气…）在档位节点附近没有成交，
+    实际取的是更早的最后一笔，而页面「起始时间」列显示的是标称节点 ——
+    看起来精确、实际模糊，拿它去分钟图上反查会对不上。这两个字段供前端如实显示。
+  - 继承（v1.8 续接）、换月修正行过渡继承（v1.9.1）时一并继承这两个字段；
+    换月修正行置空（修正值来自"昨结算"，不对应任何一笔分时）。
+  - 文件末尾新增一行统计打印，便于日志里直接看到偏移情况。
+
 v1.9.2 更新（2026-10-16）：
   - 新增「10:15 档预轮等待」：GitHub 定时任务实测稳定延迟 26~36 分钟执行，
     原 10:17 轮实际要 10:4x 才跑，赶不上 10:30 前参考。为此在 fetch.yml 新增
@@ -110,6 +146,15 @@ def now_cn():
     return datetime.now(CN_TZ).replace(tzinfo=None)
 
 # ---------------- 品种表（与 v1.7 完全一致，用户手排顺序勿动） ----------------
+# v1.13: 品种改名对照（旧名 → 新名）。**只用于继承上一版 data.json 时兼容旧名**，
+#   保证改名后的第一轮照样能继承到值，不会出现一次"缺"。
+NAME_ALIAS_MAP = {
+    '美黄豆粉': '美豆粕',
+    '美黄豆油': '美豆油',
+    '美国棉花': '美棉花',
+    '美国天然气': '美天然气',
+}
+
 VARIETIES = [
     ('WTI原油(23:00)',    'M23',   '102.CL00Y',  'hf_CL'),
     ('WTI原油(02:30)',    'M0230', '102.CL00Y',  'hf_CL'),
@@ -126,12 +171,12 @@ VARIETIES = [
     ('伦铜',        'M01',   '109.LCPT',   'hf_CAD'),
     ('伦铅',        'M01',   '109.LLDT',   'hf_PBD'),  # v1.1: 新浪伦铅代码 PBD
     ('美燃油',       'M23',   '102.HO00Y',  'hf_HO'),
-    ('美国天然气',    'M23',   '102.NG00Y',  'hf_NG'),
+    ('美天然气',      'M23',   '102.NG00Y',  'hf_NG'),
     ('美大豆',       'M23',   '103.ZS00Y',  'hf_S'),
-    ('美黄豆粉',     'M23',   '103.ZM00Y',  'hf_SM'),
-    ('美黄豆油',     'M23',   '103.ZL00Y',  'hf_BO'),
+    ('美豆粕',       'M23',   '103.ZM00Y',  'hf_SM'),
+    ('美豆油',       'M23',   '103.ZL00Y',  'hf_BO'),
     ('美原糖',       'M23',   '108.SB00Y',  'hf_RS'),
-    ('美国棉花',     'M23',   '108.CT00Y',  'hf_CT'),
+    ('美棉花',       'M23',   '108.CT00Y',  'hf_CT'),
     ('马棕油',       'M23',   '110.MPM00Y', 'hf_FCPO'),
     ('新加坡铁矿石',  'M23',   None,         'hf_FEF'),
     ('日橡胶',       'M23',   '111.JRU00Y', 'hf_RSS3'),
@@ -519,6 +564,7 @@ def index_ref_point(now, trade_days):
 
 def ref_price_from_bars(bars, ref_dt, max_gap_hours=14, now=None, allow_stale=False):
     """从 [(datetime, price)] 里找 <= ref_dt 的最后一根。
+    v1.10: 返回值增加第三项 = 该笔的 datetime（取价笔时刻），供"实际取价笔"字段使用。
     allow_stale=True 时（新浪分时通道用）：gap 超限也放行——
     覆盖"原糖/豆粉"这类白天已收盘、最后成交价即有效参考价的品种。"""
     best = None
@@ -530,14 +576,14 @@ def ref_price_from_bars(bars, ref_dt, max_gap_hours=14, now=None, allow_stale=Fa
         else:
             break
     if best is None:
-        return None, 'missing'
+        return None, 'missing', None
     if (ref_dt - best[0]) > timedelta(hours=max_gap_hours):
         if allow_stale:
-            return best[1], 'ok'
+            return best[1], 'ok', best[0]          # v1.10: 一并返回取价笔时刻
         feed_live = bars and (now or now_cn()) - bars[-1][0] <= timedelta(hours=8)
         if not feed_live:
-            return None, 'stale'
-    return best[1], 'ok'
+            return None, 'stale', None
+    return best[1], 'ok', best[0]                   # v1.10: 一并返回取价笔时刻
 
 # ---------------- 主流程 ----------------
 def main():
@@ -660,7 +706,14 @@ def main():
             continue
         if _r.get('ref'):
             prev_by_key[(_r.get('name'), _r.get('ref'))] = _r
+            # v1.13: 上一版里的"旧名 + 同 ref"行，也注册到新名下 → 改名后第一轮照样能继承
+            _nn = NAME_ALIAS_MAP.get(_r.get('name'))
+            if _nn:
+                prev_by_key.setdefault((_nn, _r.get('ref')), _r)
         prev_by_name.setdefault(_r.get('name'), _r)
+        _nn2 = NAME_ALIAS_MAP.get(_r.get('name'))
+        if _nn2:
+            prev_by_name.setdefault(_nn2, _r)
         if '换月' in (_r.get('note') or ''):
             prev_special.setdefault(_r.get('name'), _r)
 
@@ -679,6 +732,7 @@ def main():
         bars_ml = ml_by_sym.get(sym, []) if sym else []
 
         last, flag = None, False
+        hit_dt = None   # v1.10: 本行基准价实际取自哪一笔（datetime）；不适用/取不到时 None
         # v1.4: 新浪快照优先（与参考价同源）；东财仅作兜底、不再做两源差异比对
         #（两源的连续/主力合约口径本就不同，比对会产生误导性的 ※ 标记）
         if sina_code and sina_code in sina_map:
@@ -695,66 +749,64 @@ def main():
             # v1.1: 新浪当日分时优先（新鲜），5 日线兜底（可跨日）
             if bars_ml:
                 try:
-                    close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                    close, st, hit_dt = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
                                                     now=now, allow_stale=True)
                 except Exception:
                     close = None
             if close is None:
                 try:
                     bars5 = sina_5day_minline('XAG')
-                    close, st = ref_price_from_bars(bars5, ref_dt, now=now)
+                    close, st, hit_dt = ref_price_from_bars(bars5, ref_dt, now=now)
                 except Exception:
                     close = None
             if close is None:
                 note = '缺'
         elif name == '美原糖':
-            # v1.5: 原糖时段 15:30 → 次日 01:00。
-            # day 模式（时段已开盘/进行中）：参考 = 前一（时段）01:00 收盘价（日K"昨天"根，
-            # 排除"今天"根——它含 15:30 起进行中的夜盘，会随时间漂移），并同步修正标签为该收盘时刻。
-            # 夜盘模式（8:50/12:50，时段已收盘未开）：参考 = 前一晚 23:00（minline 内），逻辑不变。
-            if bars_ml:
+            # v1.13（用户口径）：所有品种统一以"国内 15:00 收盘"为基准价。
+            #   原糖自身时段 15:30 → 次日 01:00，所以 15:00 那一刻它【没有成交】。
+            #   day 档（15:00 基准）：取"15:00 之后的第一笔"（≈它今天开盘的价），
+            #     这样时间跨度与其他品种基本一致，而不是退到 14 小时前（今晨 01:00 的收盘价）。
+            #   m1015 / m1130 / night 档：15:00 之后的价还没产生（或基准本就是 23:00），
+            #     保持"取 ≤ 节点最后一笔"的通用逻辑。
+            #   分时表取不到时（如次日表已滚动）交给 v1.8 继承机制按同 ref 顶住，不降级、不显示缺。
+            if mode == 'day' and bars_ml:
+                for _dt, _c in bars_ml:
+                    if _dt >= ref_dt:
+                        close, hit_dt = _c, _dt
+                        break
+            if close is None and bars_ml:
                 try:
-                    close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                    close, st, hit_dt = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
                                                     now=now, allow_stale=True)
-                except Exception:
-                    close = None
-            if close is None:
-                try:
-                    d_str, c2 = sina_dailyk_closed_bar('RS', now, exclude_today=True)
-                    if c2 is not None:
-                        close = c2
-                        # 参考的准确时点 = 该日K次日的 01:00（北京），与日K数据保持一致（跨周末自动正确）
-                        if mode != 'night' and d_str:
-                            rd = datetime.strptime(d_str, '%Y-%m-%d') + timedelta(days=1)
-                            ref_text = f'{rd:%m-%d} 01:00'
                 except Exception:
                     close = None
             if close is None and secid:
                 try:
-                    close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
+                    close, st, hit_dt = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
                     if st != 'ok':
                         close = None
                 except Exception:
                     close = None
-            # v1.7: 分时路径下同步修正标签——原糖时段 15:30 → 次日 01:00，白天/day 档
-            #       实际取价笔为上一时段 01:00 收盘，标签同步为该真实时刻
-            if close is not None and mode != 'night' and ref_text is None and bars_ml:
-                _lb = None
-                for _dt, _c in bars_ml:
-                    if _dt <= ref_dt:
-                        _lb = _dt
-                    else:
-                        break
-                if _lb is not None and (ref_dt - _lb) > timedelta(hours=1):
-                    ref_text = f'{_lb:%m-%d %H:%M}'
             if close is None:
-                note = '缺'
+                note = '缺'   # 下一轮/上一版按同 ref 继承
+
         elif name == '日橡胶':
-            # v1.4: 日橡胶夜盘 16:00 开盘后旧时段被顶掉（同"开盘点效应"）
-            # → 用日K"今天"那根兜底（= 当日日盘收盘价，14:00 收盘后不再变）
-            if bars_ml:
+            # v1.11: 日盘 14:50 收盘。day 档（15:00 基准）改用"今天日K那根的收盘价"：
+            #   该品种成交极稀疏，分时表在收盘前常已无成交（实测最后一笔只到 14:11），
+            #   而日K"今天"那根的 close 就是 14:50 的收盘价，且夜盘 16:00 开盘后也不再变。
+            #   （用户实测：新浪行情页显示的是 14:50 的数据，即收盘价。）
+            if mode == 'day':
                 try:
-                    close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                    _rd, _rc = sina_dailyk_closed_bar('RSS3', now, exclude_today=False)
+                    if _rc is not None and _rd == now.date().isoformat():
+                        close = _rc
+                        ref_text = f'{now:%m-%d} 14:50'          # 语义即"日盘 14:50 收盘"
+                        hit_dt = now.replace(hour=14, minute=50, second=0, microsecond=0)
+                except Exception:
+                    close = None
+            if close is None and bars_ml:
+                try:
+                    close, st, hit_dt = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
                                                     now=now, allow_stale=True)
                 except Exception:
                     close = None
@@ -765,7 +817,7 @@ def main():
                     close = None
             if close is None and secid:
                 try:
-                    close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
+                    close, st, hit_dt = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
                     if st != 'ok':
                         close = None
                 except Exception:
@@ -776,7 +828,7 @@ def main():
             if ref_dt is not None:
                 try:
                     bars = sina_minline_today('FEF')
-                    close, st = ref_price_from_bars(bars, ref_dt, max_gap_hours=10, now=now)
+                    close, st, hit_dt = ref_price_from_bars(bars, ref_dt, max_gap_hours=10, now=now)
                 except Exception:
                     close = None
             # v1.8: 日K兜底会把口径降级为"时段起点"（如 20:00），优先继承上一版
@@ -789,6 +841,7 @@ def main():
             if close is None and ref_dt is not None:
                 try:
                     close, ref_show = fef_ref_from_dailyk(ref_dt)
+                    hit_dt = ref_show   # v1.10: 该值取自日K的时段起点
                 except Exception:
                     close, ref_show = None, None
             if close is None:
@@ -813,13 +866,13 @@ def main():
                 # 商品：新浪当日分时优先（云端稳定），东财 K 线兜底（v1.1）
                 if bars_ml:
                     try:
-                        close, st = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
+                        close, st, hit_dt = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=26,
                                                         now=now, allow_stale=True)
                     except Exception:
                         close = None
                 if close is None:
                     try:
-                        close, st = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
+                        close, st, hit_dt = ref_price_from_bars(bars_map.get(secid, []), ref_dt, now=now)
                         if st != 'ok':
                             note = '缺' if st == 'missing' else '过'
                     except Exception:
@@ -831,10 +884,33 @@ def main():
         if close is not None and last is not None and close > 0:
             chg = last - close
             pct = chg / close * 100
+        # v1.10: 记录"实际取价笔时刻"与"页面显示的起始时刻和它的差"（纯说明用途，不参与任何计算）
+        _ref_actual = f'{hit_dt:%m-%d %H:%M}' if hit_dt is not None else None
+        # 偏差基准 = 本行「起始时间」列最终显示的那个时刻（优先 ref_text 修正值，其次档位节点 ref_show）
+        _nominal = ref_show if ref_text is None else None
+        if ref_text is not None and hit_dt is not None:
+            _m = re.match(r'^(\d{2})-(\d{2}) (\d{2}):(\d{2})$', ref_text)
+            if _m:
+                try:
+                    _cand = hit_dt.replace(month=int(_m.group(1)), day=int(_m.group(2)),
+                                           hour=int(_m.group(3)), minute=int(_m.group(4)),
+                                           second=0, microsecond=0)
+                    if (_cand - hit_dt).days > 180:
+                        _cand = _cand.replace(year=_cand.year - 1)
+                    elif (hit_dt - _cand).days > 180:
+                        _cand = _cand.replace(year=_cand.year + 1)
+                    _nominal = _cand
+                except ValueError:
+                    _nominal = None
+        _gap_min = None
+        if hit_dt is not None and _nominal is not None:
+            _gap_min = int(round((_nominal - hit_dt).total_seconds() / 60.0))
         rows.append({
             'name': name, 'close': close, 'last': last, 'chg': chg, 'pct': pct,
             'flag': flag, 'note': note, 'code': sina_code,
             'ref': ref_text if ref_text is not None else (f'{ref_show:%m-%d %H:%M}' if ref_show else None),
+            'ref_actual': _ref_actual,   # v1.10: 实际取价笔时刻，如 "10-16 10:23"
+            'gap_min': _gap_min,         # v1.10: 与「起始时间」列显示时刻的分钟差，如 67
         })
 
     # ---------------- v1.8：取不到价的续接（后处理） ----------------
@@ -864,6 +940,8 @@ def main():
         if p is None:
             continue
         row['close'] = p['close']
+        row['ref_actual'] = p.get('ref_actual')   # v1.10: 说明字段一并继承，保持口径一致
+        row['gap_min'] = p.get('gap_min')
         if row['last'] is None:
             row['last'] = p.get('last')
         if row.get('note') == '缺':
@@ -891,6 +969,7 @@ def main():
         if cur_d and old_d and cur_d < old_d:
             row['close'], row['last'] = p['close'], p.get('last')
             row['ref'], row['chg'], row['pct'] = p.get('ref'), p.get('chg'), p.get('pct')
+            row['ref_actual'], row['gap_min'] = p.get('ref_actual'), p.get('gap_min')
             row['note'] = '防退'
             rollback_keep += 1
             print(f"防回退: {row['name']} 本轮源数据({cur_d})落后于上一版({p.get('ref')})，保留上一版")
@@ -927,6 +1006,8 @@ def main():
         row['close'] = ps
         row['ref'] = '昨结 换月'
         row['note'] = '换月'
+        row['ref_actual'] = None   # v1.10: "昨结算"不对应任何一笔分时，说明字段置空
+        row['gap_min'] = None
         if row['last'] is not None:
             row['chg'] = row['last'] - ps
             row['pct'] = row['chg'] / ps * 100
@@ -955,6 +1036,16 @@ def main():
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data.json')
     with open(out, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
+    # v1.10: 顺带把"实际取价笔"的偏移情况打到日志里，方便一眼看出稀疏品种
+    _gaps = [(r['name'], r['gap_min']) for r in rows if r.get('gap_min') is not None]
+    if _gaps:
+        _off = [(n, g) for n, g in _gaps if abs(g) >= 3]
+        _msg = f'实际取价笔: {len(_gaps)} 行有记录'
+        if _off:
+            _msg += f', 其中偏离标称节点 >=3 分钟 {len(_off)} 行: ' + \
+                    ', '.join(f'{n}{g:+d}分' for n, g in sorted(_off, key=lambda x: -abs(x[1]))[:8])
+        print(_msg)
+
     ok_n = sum(1 for r in rows if r['pct'] is not None)
     print(f'完成: {ok_n}/{len(rows)} 个品种有涨跌幅, 耗时 {time.time() - t0:.0f} 秒')
     print(f'已写入 {out}')

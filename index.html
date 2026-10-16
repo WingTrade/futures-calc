@@ -60,6 +60,11 @@
   }
   .foot .warn{color:#c0392b;}
   .tip{margin-top:4px; text-align:center; font-size:11px; color:#aab; contain:inline-size; width:100%;}
+  /* v2.10: 行内小标记（即时 / 实取 / 延时来源） */
+  .mk{font-size:10px; line-height:1; padding:1px 3px; border-radius:3px; margin-left:3px; display:inline-block;}
+  .mk-live{background:#E8F5E9; color:#0B8043; border:1px solid #A5D6A7;}
+  .mk-lag{background:#FFF8E1; color:#8D6E00; border:1px solid #FFE082;}
+  .mk-src{background:#FBE9E7; color:#C0392B; border:1px solid #F7C1BB;}
   @media (max-width:520px){
     body{padding:4px;}
     td{padding:1px 4px;}
@@ -129,11 +134,33 @@
   </div>
   <div class="tip">实时最新价 · 新浪/腾讯双通道每 15 秒刷新 · 起始价按节点定时更新</div>
   <div class="tip">双绿灯，全部品种均为实时；红灯异常时，部分品种降级为延时</div>
+  <div class="tip" id="tipMark">平时表格是干净的：「起始时间」列 = 该品种实际取到那一笔价的时刻，与整点档位不同时才打 ※（悬停看细节）·只有"这行的价确实是旧时刻的"才标出时刻（如「分时 14:11」）·三条实时路都没拿到时标「缓存」</div>
 </div>
 
 <script>
 /* =====================================================================
-   外盘涨跌统计 · 前端 v2.9（2026-10-16）
+   外盘涨跌统计 · 前端 v2.11（2026-10-16 · 海鸥工作区）
+   v2.11：① 剔掉所有延时行情源 —— 腾讯 fuHO（延时 10-15 分钟）与 TradingView
+            （延时 10-20 分钟）不再使用（用户要求：只要当下的价，差 10 分钟以上不要）。
+          ② 新增「分时接管」——新浪快照通道（Cloudflare 中转）故障时，自动改用
+            **可直连的新浪分时表末根**：活跃品种即当前这一分钟的成交价，与起始价
+            同源同口径；该品种此刻确实无新成交时，把那一笔的时刻直接标在行上。
+            来源：stock2.finance.sina.com.cn（实测 56-102ms 可直连、不需 Referer、
+            支持 JSONP），主路恢复后立即停用。
+   v2.10：三处增量（其余与 v2.9 一致）：
+     ① 「起始时间」说真话：显示该行【实际取到那一笔价】的时刻（云端 data.json 新增 ref_actual /
+        gap_min 字段）。此前显示的是档位节点（如 11:30），但稀疏品种实际取的是更早的最后一笔
+        （美豆粕 14:46、日橡胶 14:11…），拿去分钟图上反查会对不上。两者不同时打 ※ 并悬停提示。
+        兼容：云端未换脚本时没有这两个字段 → 行为与 v2.9 完全相同。
+     ② 最新价来源标记：走 TradingView 延时兜底、或美燃油（腾讯只有延时源 fuHO）的行，
+        涨跌幅后标「延」，避免把 10-20 分钟的延时数据当成实时看。
+     ③ 前端翻表补档：起始价从来不是"守着节点抓"的，而是事后从当日分时表里挑 ≤ 节点的那一笔
+        （云端 fetch.py 就是这么干的）。所以时段未切换时，页面自己用 JSONP（script 注入，
+        无需 CORS / 无需中转）拉同一张表，就能算出与云端逐位一致的基准价。
+        用途：GitHub Actions 排队 26-36 分钟，页面在 10:30 开盘前可能还停在旧档 ——
+        此时前端自己补上（值同源同口径、与云端逐位一致，所以不加任何标记）；
+        data.json 一更新就自动切回云端值（数字一致）。
+        仅白天三档（10:15 / 11:30 / 15:00）补；夜盘各组节点不同，不补。
    v2.9：马棕油（BMD）显示窗口 —— 它 23:00 收盘、次日 10:30 才开盘，中间无波动；
          仅在【工作日 10:30-23:00】显示该行（早上隔夜档的收盘僵值无参考意义），
          覆盖两个看盘点：13:30 前（国内下午盘参考）、21:00 前（国内夜盘参考）。
@@ -184,14 +211,16 @@ var NAME2CODE = {
   '美黄金':'hf_GC','美白银':'hf_SI','伦敦银现货':'hf_XAG',
   '伦铝':'hf_AHD','伦锌':'hf_ZSD','伦镍':'hf_NID','伦锡':'hf_SND',
   '美铜':'hf_HG','伦铜':'hf_CAD','伦铅':'hf_PBD',
-  '美燃油':'hf_HO','美国天然气':'hf_NG',
-  '美大豆':'hf_S','美黄豆粉':'hf_SM','美黄豆油':'hf_BO',
-  '美原糖':'hf_RS','美国棉花':'hf_CT','马棕油':'hf_FCPO',
+  '美燃油':'hf_HO','美天然气':'hf_NG',
+  '美大豆':'hf_S','美豆粕':'hf_SM','美豆油':'hf_BO',
+  '美原糖':'hf_RS','美棉花':'hf_CT','马棕油':'hf_FCPO',
   '新加坡铁矿石':'hf_FEF','日橡胶':'hf_RSS3'
 };
 /* 腾讯代码例外表：默认与新浪 hf_ 代码一致，个别品种不同。
-   美燃油：腾讯无 hf_HO 实时源，须用 fuHO（延时行情，约 10-15 分钟） */
-var TX_OVERRIDE = { 'hf_HO': 'fuHO' };
+   v2.11：不再使用腾讯 fuHO —— 它是延时行情（约 10-15 分钟），
+          用户要求"只要当下的价，差 10 分钟以上不要"。美燃油改由新浪通道覆盖，
+          通道异常时由分时表末根接管（两者都是当下价）。 */
+var TX_OVERRIDE = {};
 
 /* ---------- 新浪准实时通道（Cloudflare 中转）配置 ---------- */
 /* 浏览器直连 hq.sinajs.cn 必被 403（防盗链）+ 无 CORS 头，故走自建中转（原样转发 GBK 字节 + ACAO:*）。
@@ -211,7 +240,7 @@ var SINA_SYMS = { 'hf_RS':1, 'hf_CT':1, 'hf_FCPO':1, 'hf_FEF':1, 'hf_RSS3':1, 'h
    新加坡铁矿不接 TV：TV 主连与起始价的新浪口径差 ~0.5%（疑换月差异）会让涨跌方向出错；铁矿已由新浪通道同源覆盖 */
 var TV_SYMS = {
   'hf_RS':   'ICEUS:SB1!',    /* 美国原糖   ~10 分钟 */
-  'hf_CT':   'ICEUS:CT1!',    /* 美国棉花   ~10 分钟 */
+  'hf_CT':   'ICEUS:CT1!',    /* 美棉花   ~10 分钟 */
   'hf_FCPO': 'MYX:FCPO1!',    /* 马棕油     ~15 分钟 */
   'hf_RSS3': 'TOCOM:TRB1!'    /* 日橡胶     ~20 分钟 */
 };
@@ -260,8 +289,444 @@ function ssePhase(){
   return null;
 }
 
+/* =====================================================================
+   v2.10 增量模块
+     ① 起始时间说真话   ② 最新价来源标记   ③ 前端翻表补档
+   ---------------------------------------------------------------------
+   原理：起始价不是"守着节点抓"的，而是【事后从当日分时表里挑 ≤ 节点的那一笔】。
+   云端 fetch.py 就是这么算的。只要交易时段没切换，本页用同一张表、同一套挑法，
+   就能算出与云端逐位一致的基准价（已实测对账）。
+   用途：云端（GitHub Actions）有 26-36 分钟排队延迟，开盘前页面可能还停在旧档 ——
+        此时本页自己把这一档补上（值同源同口径、与云端逐位一致，所以【不加任何标记】）；
+        data.json 一更新就自动切回云端值。
+   安全性：只在"云端档位落后且已迟到"时触发；成功率低于一半就整体放弃、维持原样；
+          夜盘档（各组节点不同）不补；云端一旦切到当前档，以云端为准。
+   ===================================================================== */
+var PROBE_MINLINE = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesMinLine?symbol=';
+var PROBE_MS = 60000;            /* 补档检查间隔（毫秒） */
+var PROBE_TIMEOUT = 12000;       /* 单个品种分时请求超时（毫秒） */
+var PROBE_LAG_MIN = 10;          /* 云端数据"迟到"判据：距今超过这么多分钟才考虑补档 */
+var PROBE_CACHE_KEY = 'waiPanRefLiveV1';
+var PROBE_MIN_OK_RATE = 0.5;     /* 补档成功率低于此值 → 放弃补档，维持云端值 */
+var PROBE_RETRY_MS = 5 * 60000;  /* 同一档补档失败后的重试间隔 */
+
+var refLive = null;              /* 补档结果 {key,date,mode,node,rows:{名:价},actual:{名:{t,gap}},ok,fail,done,ts} */
+var probeBusy = false, probeTimer = null, probeTried = {};
+var probeSeq = 0;
+
+/* 当前"应有"档位（与云端 fetch.py decide_mode 同规则；周末按夜盘） */
+function expectMode(){
+  var d = new Date(), wd = d.getDay(), t = d.getHours()*60 + d.getMinutes();
+  if(wd === 0 || wd === 6) return 'night';
+  if(t >= 15*60 && t < 23*60) return 'day';
+  if(t >= 10*60+15 && t < 11*60+30) return 'm1015';
+  if(t >= 11*60+30 && t < 15*60) return 'm1130';
+  return 'night';
+}
+/* 补档只做白天三档（全品种统一节点）；夜盘各组节点不同（23:00/01:00/02:30），不补 */
+function probeNode(mode){
+  if(mode === 'm1015') return '10:15';
+  if(mode === 'm1130') return '11:30';
+  if(mode === 'day')   return '15:00';
+  return null;
+}
+function probeKey(date, node){ return date + '|' + node; }
+function hhmmOf(min){ return pad2(Math.floor(min/60)) + ':' + pad2(min % 60); }
+
+/* JSONP：新浪分时接口支持 callback → 用 <script> 注入即可取（无需 CORS、无需中转） */
+function jsonpMinline(sym){
+  return new Promise(function(resolve){
+    var cb = 'wpRef' + (probeSeq++) + '_' + Date.now();
+    var s = document.createElement('script'), done = false;
+    var tid = setTimeout(function(){ fin(null, 'timeout'); }, PROBE_TIMEOUT);
+    function fin(o, err){
+      if(done) return;
+      done = true;
+      clearTimeout(tid);
+      try{ if(s.parentNode) s.parentNode.removeChild(s); }catch(e){}
+      try{ delete window[cb]; }catch(e){ window[cb] = undefined; }
+      resolve({ data:o, err:err });
+    }
+    window[cb] = function(o){ fin(o, null); };
+    s.onerror = function(){ fin(null, 'script-error'); };
+    s.src = PROBE_MINLINE + encodeURIComponent(sym) + '&callback=' + cb + '&_=' + Date.now();
+    document.body.appendChild(s);
+  });
+}
+/* 日K JSONP（固定回调名 var d=）——仅日橡胶的补档特例用：
+   它 14:50 就收盘，分时表在收盘前常常已无成交（或已切到夜盘时段），
+   而"今天日K那根的收盘价"就是 14:50 的收盘价（夜盘 16:00 开盘后也不变）。 */
+var PROBE_DAILYK = 'https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20d=/GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=';
+function jsonpDailyK(sym){
+  return new Promise(function(resolve, reject){
+    var s = document.createElement('script'), done = false;
+    var tid = setTimeout(function(){ fin('timeout'); }, PROBE_TIMEOUT);
+    function fin(err){
+      if(done) return;
+      done = true;
+      clearTimeout(tid);
+      try{ if(s.parentNode) s.parentNode.removeChild(s); }catch(e){}
+      if(err){ reject(new Error(err)); } else { resolve(window.d); }
+    }
+    s.onload = function(){ setTimeout(function(){ fin(null); }, 30); };
+    s.onerror = function(){ fin('script-error'); };
+    s.src = PROBE_DAILYK + encodeURIComponent(sym) + '&_=' + Date.now();
+    document.body.appendChild(s);
+  });
+}
+
+/* 分时表 → [{date,min,price}]（时间倒退视为跨日） */
+function buildPoints(arr){
+  var out = [], prev = -1, cur = null;
+  if(!arr || !arr.length) return out;
+  for(var i=0;i<arr.length;i++){
+    var e = arr[i];
+    if(!e || e.length < 2) continue;
+    var tk = String(e[0]);
+    if(!/^\d{2}:\d{2}$/.test(tk)) continue;
+    var mn = parseInt(tk.slice(0,2),10)*60 + parseInt(tk.slice(3,5),10);
+    var price = parseFloat(e[1]);
+    if(isNaN(price)) continue;
+    if(prev >= 0 && mn < prev){
+      var d = new Date(cur + 'T00:00:00');
+      d.setDate(d.getDate()+1);
+      cur = d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());
+    }else if(cur === null){
+      cur = String((arr[0] && arr[0][0]) || '').slice(0,10);
+    }
+    prev = mn;
+    out.push({date:cur, min:mn, price:price});
+  }
+  return out;
+}
+/* 取 ≤ 目标（日期 ≤ 目标日 且 分钟 ≤ 目标分钟）的最后一笔 —— 与云端同规则 */
+function pickPoint(pts, dateKey, targetMin){
+  var best = null;
+  for(var i=0;i<pts.length;i++){
+    var p = pts[i];
+    if(p.date > dateKey) break;
+    if(p.date === dateKey && p.min > targetMin) break;
+    best = p;
+  }
+  return best;
+}
+
+/* ---------- 缓存与状态判定 ---------- */
+function loadProbeCache(){
+  try{
+    var o = JSON.parse(localStorage.getItem(PROBE_CACHE_KEY) || 'null');
+    if(o && o.key && o.rows && o.done) return o;
+  }catch(e){}
+  return null;
+}
+function saveProbeCache(o){ try{ localStorage.setItem(PROBE_CACHE_KEY, JSON.stringify(o)); }catch(e){} }
+
+/* 补档是否正在生效（= 展示应以本页现算值为准） */
+function refLiveActive(){
+  if(!refLive || !refLive.done) return false;
+  var mode = expectMode(), node = probeNode(mode);
+  if(!node) return false;
+  if(refLive.key !== probeKey(todayYmd(), node)) return false;
+  if(state.data && state.data.mode === mode) return false;   /* 云端已切到当前档 → 以云端为准 */
+  return true;
+}
+/* 是否需要发起补档：云端档位 ≠ 应有档位，且云端数据已"迟到" */
+function probeNeeded(){
+  var d = state.data;
+  if(!d || !d.rows) return false;
+  var mode = expectMode(), node = probeNode(mode);
+  if(!node) return false;
+  if(d.mode === mode) return false;
+  var ga = String(d.generated_at || '');
+  if(ga.slice(0,10) !== todayYmd()) return false;             /* 云端数据不是今天的 → 可能休市，不乱补 */
+  var t = Date.parse(ga.replace(' ', 'T') + ':00');
+  if(isNaN(t)) return false;
+  if((Date.now() - t) < PROBE_LAG_MIN * 60000) return false;  /* 还没迟到 */
+  return true;
+}
+
+/* ---------- 补档主流程 ---------- */
+async function probeRun(mode, node, date, key){
+  probeBusy = true;
+  var rows = (state.data && state.data.rows) || [];
+  var targetMin = parseInt(node.slice(0,2),10)*60 + parseInt(node.slice(3,5),10);
+  var out = { key:key, date:date, mode:mode, node:node, rows:{}, actual:{}, ok:0, fail:0, done:false, ts:Date.now() };
+  var cand = [];
+  for(var i=0;i<rows.length;i++){
+    var sc = sinaCodeOf(rows[i]);
+    /* v2.12: 美原糖不参与补档 —— 它的基准是"国内糖最近一次收盘时刻（23:00）"的价，
+       与当前档位（10:15/11:30/15:00）无关，云端那份本来就是对的。 */
+    if(sc && rows[i].name !== '美原糖') cand.push({ name:rows[i].name, code:sc });
+  }
+  for(var j=0;j<cand.length;j++){
+    var c = cand[j];
+    var sym = c.code.indexOf('hf_') === 0 ? c.code.slice(3) : c.code;
+    /* v2.11: 日橡胶特例 —— 日盘 14:50 收盘，分时表在收盘前常已无成交
+       （实测最后一笔只到 14:11），或已切到夜盘时段（取不到 ≤ 节点的笔）。
+       直接取"今天日K那根的收盘价" = 14:50 的收盘价（与云端同一口径）。 */
+    if(c.name === '日橡胶' && mode === 'day'){
+      try{
+        var dk = await jsonpDailyK('RSS3');
+        var bar = (dk && dk.length) ? dk[dk.length - 1] : null;
+        if(bar && bar.date === date){
+          var cv = parseFloat(bar.close);
+          if(!isNaN(cv)){
+            out.rows[c.name] = cv;
+            out.actual[c.name] = { t: date.slice(5) + ' 14:50', gap: 0 };
+            out.ok++;
+            continue;
+          }
+        }
+      }catch(e){ /* 拿不到就落回下面的分时逻辑 */ }
+    }
+    try{
+      var res = await jsonpMinline(sym);
+      var arr = res.data && res.data.result && res.data.result.data && res.data.result.data.minLine_1d;
+      var pts = buildPoints(arr);
+      var hit = pickPoint(pts, date, targetMin);
+      if(!hit){ out.fail++; continue; }
+      var v = hit.price;
+      if(c.code === 'hf_HG') v = v / 100;                       /* 美铜：接口为美分/磅（与云端同口径） */
+      out.rows[c.name] = v;
+      out.actual[c.name] = { t: hit.date.slice(5) + ' ' + hhmmOf(hit.min), gap: targetMin - hit.min };
+      out.ok++;
+    }catch(e){
+      out.fail++;
+    }
+  }
+  probeBusy = false;
+  var total = out.ok + out.fail;
+  if(total && (out.ok / total) >= PROBE_MIN_OK_RATE){
+    out.done = true;
+    refLive = out;
+    saveProbeCache(out);
+  }else{
+    probeTried[key] = Date.now();                               /* 成功率太低：本轮放弃，过一会儿再试 */
+  }
+  render();
+}
+
+async function probeTick(){
+  if(probeBusy) return;
+  if(!state.data) return;
+  var mode = expectMode(), node = probeNode(mode);
+  if(!node) return;                                             /* 夜盘档不补 */
+  var key = probeKey(todayYmd(), node);
+  if(!refLive || refLive.key !== key){
+    var c = loadProbeCache();
+    if(c && c.key === key) refLive = c;                          /* 命中缓存（同一档不必重拉） */
+  }
+  if(refLive && refLive.key === key){ render(); return; }
+  if(!probeNeeded()) return;
+  if(probeTried[key] && (Date.now() - probeTried[key]) < PROBE_RETRY_MS) return;
+  await probeRun(mode, node, todayYmd(), key);
+}
+function scheduleProbe(){
+  clearTimeout(probeTimer);
+  probeTimer = setTimeout(function(){ probeTick().then(scheduleProbe); }, PROBE_MS);
+}
+
+/* ---------- 展示层：基准价来源 / 起始时间说真话 / 延时标记 ---------- */
+/* 基准价 ① 本页即时补档（整档统一，避免同一张表混源） ② 云端 data.json */
+function baseQuoteOf(r){
+  /* 美股三行（标普/道指/纳指）没有实时源：它们是"最近两个收盘价对比"的收盘口径，
+     全天固定，不随盘中波动，也不参与补档/接管 —— 永远用云端值，且不打任何标记。 */
+  if(!sinaCodeOf(r)){
+    return { close: r.close, ref: r.ref_actual || r.ref, mark: '', markTip: '', refTip: '' };
+  }
+  if(refLiveActive()){
+    var v = refLive.rows[r.name];
+    /* v2.12: 美原糖不参与补档（它的基准跟着国内糖的收盘时刻走，与档位无关）→ 用云端值 */
+    if(v == null && r.name === '美原糖'){
+      return { close: r.close, ref: r.ref_actual || r.ref, mark: '', markTip: '', refTip: '' };
+    }
+    var a = refLive.actual[r.name];
+    var refTxt = a ? a.t : ((refLive.date || '').slice(5) + ' ' + refLive.node);
+    /* 补档算出来的基准价与云端逐位一致（同源同口径），所以【不做任何标记】——
+       标出来只会让人怀疑"这个数是不是临时的"。只有"算不出来"的情况才需要说明。 */
+    return { close: (v == null ? null : v), ref: refTxt, mark: '', markTip: '', refTip: '' };
+  }
+  var gap = (typeof r.gap_min === 'number') ? r.gap_min : null;
+  var mark = '', tip = '';
+  if(r.ref_actual && gap !== null && Math.abs(gap) >= 3){
+    mark = '※';
+    tip = '档位节点 ' + (r.ref || '') + '，实际取到那一笔价是 ' + r.ref_actual + '（' +
+          (gap < 0 ? '该品种在节点时刻还没开盘，取的是之后的第一笔'
+                   : '该品种成交稀疏，节点附近那一分钟没有成交') +
+          '，相差 ' + Math.abs(gap) + ' 分钟）';
+  }
+  return { close: r.close, ref: r.ref_actual || r.ref, mark: mark, markTip: tip, refTip: tip };
+}
+/* 最新价来源标记：延时源（TradingView 兜底 / 美燃油 fuHO） */
+function srcTag(r, q){
+  if(!q) return '';
+  var sc = sinaCodeOf(r);
+  if(sc && state.ml && state.ml[sc] && q === state.ml[sc]) return mlTag(state.ml[sc]);  /* v2.11 分时接管 */
+  if(sc && state.gq && state.gq[sc] && q === state.gq[sc]) return '延时';
+  if(rowCode(r) === 'fuHO') return '延时';
+  return '';
+}
+/* 备用来源说明（鼠标悬停可见） */
+function srcTagTip(tag, r, q){
+  if(tag && tag.indexOf('分时') === 0){
+    var sc = sinaCodeOf(r);
+    return mlTagTip(sc && state.ml ? state.ml[sc] : null);
+  }
+  if(tag === '延时') return '此价来自延时源（约 10-15 分钟延时）';
+  if(tag === '缓存') return '实时通道都没拿到价，此价来自云端落盘值（较旧，仅供参照）';
+  return '该行最新价来自备用数据源';
+}
+/* 页脚补充提示：只在"补档没能拿到数据"时说一句（算得准就不打扰） */
+function refLiveNote(d){
+  var mode = expectMode(), node = probeNode(mode);
+  if(node && !refLiveActive() && probeTried[probeKey(todayYmd(), node)]){
+    return '｜云端 ' + mode + ' 档尚未更新，本页补算未取得足够数据（部分行暂空）';
+  }
+  return '';
+}
+/* =====================================================================
+   v2.11 增量模块：分时接管（让那 6 个品种在任何情况下都有【当下】的价）
+   ---------------------------------------------------------------------
+   需求约束（用户明确）：只要当下的最新价，与基准价做涨跌统计。差几秒可以，
+                        差 10 分钟以上不要 —— 所以延时行情一律不用。
+
+   问题：原糖 / 棉花 / 马棕油 / 铁矿 / 日橡胶 / 美燃油 全项目只有新浪一家源，
+        而新浪快照（hq.sinajs.cn）有防盗链 + 无 CORS，必须过 Cloudflare 中转（单点）。
+        原本以为的 TradingView 兜底在国内直连根本不通（实测 30 秒超时，无代理环境）。
+
+   解法：新浪【分时表】接口 stock2.finance.sina.com.cn 可直连（实测 56-102ms）：
+         · 不需要 Referer（快照接口必须要）
+         · 支持 JSONP → 浏览器 <script> 注入即可，绕开 CORS
+         · 表里最后一笔 = 该品种最新成交价，对活跃品种就是当前这一分钟
+           （实测与快照价一致：原糖 / 棉花 0.000%）
+         · 与起始价【同源同口径】（都是新浪），不存在跨源混算
+
+   策略：① 主路（中转快照）正常 → 照旧，零额外开销
+         ② 主路连续失败 → 自动接管：首轮全拉把 6 行填满，之后轮转（每轮 2 个品种）
+         ③ 主路恢复 → 立即停用，不浪费流量
+         ④ 某品种此刻确实没有新成交（如日橡胶）→ 不装成当下价，
+            在行上直接标出那笔的时刻（「分时 14:11」），让你一眼判断
+
+   代价：接管期分时表 1.6KB~36KB/品种，约 3-5KB/s；只在通道故障时发生。
+   ===================================================================== */
+var ML_URL = 'https://stock2.finance.sina.com.cn/futures/api/openapi.php/GlobalFuturesService.getGlobalFuturesMinLine?symbol=';
+var ML_TICK_MS = 15000;     /* 接管期检查节奏（毫秒） */
+var ML_PER_TICK = 2;        /* 每轮拉几个品种（6 个品种 → 每个约 45 秒刷新一次） */
+var ML_TIMEOUT = 12000;     /* 单个品种超时（毫秒） */
+var ML_STALE_MIN = 5;       /* 末根距现在超过这么多分钟 → 行上直接标出时刻
+                               （用户标准：滞后 1 分钟可接受，但不能超过 5 分钟还装成当下的价） */
+var mlBusy = false, mlTimer = null, mlCursor = 0;
+
+/* 接管是否启用：
+   ① 快照通道连续失败 2 次 → 接管；
+   ② 刚打开页面就完全没拿到新浪数据（失败 1 次且一条都没有）→ 立刻接管，不干等。 */
+function mlActive(){
+  var f = state.snFail || 0;
+  if(f >= 2) return true;
+  return f >= 1 && !Object.keys(state.sn || {}).length;
+}
+
+/* 需要接管的品种（= 走新浪快照的那 6 个） */
+function mlCodes(){
+  var rows = (state.data && state.data.rows) || [], out = [], seen = {};
+  for(var i=0;i<rows.length;i++){
+    var c = sinaCodeOf(rows[i]);
+    if(c && SINA_SYMS[c] && !seen[c]){ seen[c] = 1; out.push(c); }
+  }
+  return out;
+}
+
+/* 拉一个品种的分时表，取最后一笔 = 最新成交价；同时算出它距现在多少分钟 */
+async function mlFetch(code){
+  var sym = code.indexOf('hf_') === 0 ? code.slice(3) : code;
+  var res = await jsonpMinline(sym);              /* 复用 v2.10 的 JSONP 拉取 */
+  var arr = res.data && res.data.result && res.data.result.data && res.data.result.data.minLine_1d;
+  var pts = buildPoints(arr);                      /* 复用 v2.10 的解析（含跨日推断） */
+  if(!pts.length) return null;
+  var p = pts[pts.length - 1];
+  var v = p.price;
+  if(code === 'hf_HG') v = v / 100;                /* 美铜：接口为美分/磅（同云端口径） */
+  var ageMin = null;
+  try{
+    /* 距今多少分钟：只看"时分"，不依赖新浪给的日期标签
+       （不同品种的日期标签语义不一致：有的是时段开始日、有的是交易归属日，
+        例如日橡胶的表首根标 2026-10-16 / 16:13，末根 14:11 其实属于次日归属，
+        按标签推会算成"未来"→ 误判成 0 分钟，把 1 小时前的价当当下价）。 */
+    var nd = new Date();
+    ageMin = (nd.getHours() * 60 + nd.getMinutes()) - p.min;
+    if(ageMin < -5) ageMin += 1440;   /* 末根时间"看上去在未来" → 其实是昨天(或本时段前一日)那一笔 */
+    if(ageMin < 0) ageMin = 0;
+  }catch(e){}
+  return { last: v, t: hhmmOf(p.min), date: p.date, ageMin: ageMin, ts: Date.now() };
+}
+
+/* 接管行的标记：新鲜的分时价与快照只差几秒，**不标**；
+   只有"这行的价确实是旧时刻的"（该品种此刻无新成交）才把时刻摆出来，不装成当下价。 */
+function mlTag(m){
+  if(!m) return '';
+  if(m.ageMin != null && m.ageMin > ML_STALE_MIN && m.t) return '分时 ' + m.t;
+  return '';
+}
+function mlTagTip(m){
+  if(!m) return '此价取自新浪分时表末根（与起始价同源同口径）';
+  var base = '此价取自新浪分时表末根（与起始价同源同口径，约 1 分钟粒度）';
+  if(m.ageMin != null && m.ageMin > ML_STALE_MIN){
+    return base + '；该品种此刻无新成交，这一笔是 ' + m.t + ' 的（距今约 ' + m.ageMin + ' 分钟）';
+  }
+  return base + '；该笔时刻 ' + (m.t || '—') + '（距今约 ' + (m.ageMin == null ? '?' : m.ageMin) + ' 分钟）';
+}
+
+async function mlTick(){
+  if(mlBusy) return;
+  /* 状态迁移：进入 / 退出接管期 */
+  if(mlActive()){
+    if(!state.mlOn){ state.mlOn = true; state.mlFirst = false; }   /* 新一轮故障：重新全拉一次 */
+  }else{
+    if(state.mlOn){ state.mlOn = false; }
+    return;
+  }
+  if(!state.data) return;
+  var codes = mlCodes();
+  if(!codes.length) return;
+  mlBusy = true;
+  try{
+    if(state.mlFirst !== true){
+      state.mlFirst = true;
+      for(var i=0;i<codes.length;i++){                            /* 首轮全拉：尽快把 6 行填满 */
+        var r0 = await mlFetch(codes[i]);
+        if(r0){ state.ml[codes[i]] = r0; render(); }              /* 拉到一个刷一次，用户不必等全齐 */
+      }
+    }else{
+      for(var k=0;k<ML_PER_TICK;k++){                             /* 之后轮转，控制流量 */
+        var c = codes[mlCursor % codes.length];
+        mlCursor++;
+        var r1 = await mlFetch(c);
+        if(r1){ state.ml[c] = r1; render(); }
+      }
+    }
+    state.mlOk = Date.now();
+    state.mlFail = 0;
+  }catch(e){
+    state.mlFail = (state.mlFail || 0) + 1;
+  }finally{
+    mlBusy = false;
+  }
+}
+function scheduleMl(){
+  clearTimeout(mlTimer);
+  mlTimer = setTimeout(function(){ mlTick().then(scheduleMl); }, ML_TICK_MS);
+}
+
+/* 接管状态提示（页脚用） */
+function mlNote(){
+  if(!mlActive()) return '';
+  var n = 0;
+  for(var k in state.ml) if(state.ml.hasOwnProperty(k)) n++;
+  return '｜新浪快照通道异常，已自动改用同源分时表接管（' + n + ' 个品种，滞后约 1 分钟）';
+}
 /* ---------- 状态 ---------- */
 var state = { data:null, tx:null, txTime:'', txDate:'', txFail:0, sn:{}, snTime:'', snDate:'', snFail:0, gq:{},
+              ml:{}, mlOn:false, mlFirst:false, mlFail:0, mlOk:0,
               sse:null, sseLive:null, sseTryAt:0, sseErr:'' };
 var txBusy = false, jsonBusy = false, gqBusy = false, snBusy = false;
 var sseBaseBusy = false, sseLiveBusy = false, sseActive = false;
@@ -279,9 +744,10 @@ function sinaCodeOf(r){
 function quoteOf(r){
   var sc = sinaCodeOf(r);
   if(sc && state.sn && state.sn[sc]) return state.sn[sc];   /* ① 新浪（准实时，6 品种，经双通道中转） */
-  var t = state.tx && state.tx[rowCode(r)];                 /* ② 腾讯（实时；美燃油为 fuHO 延时备份） */
+  var t = state.tx && state.tx[rowCode(r)];                 /* ② 腾讯 hf_（实时，滞后几秒） */
   if(t) return t;
-  if(sc && state.gq[sc]) return state.gq[sc];               /* ③ TradingView（延时，兜底） */
+  if(sc && state.ml && state.ml[sc]) return state.ml[sc];    /* ③ v2.11 新浪分时表末根（直连接管，与起始价同源） */
+  /* v2.11: 不再回落到 TradingView —— 它延时 10-20 分钟，不符合"要当下的价" */
   return null;
 }
 function setLamp(dotId, lblId, ok){
@@ -325,12 +791,17 @@ function saveCache(d){
 function rowHtml(r){
   var nm = SHORT_NAMES[r.name] || r.name;
   var flag = r.flag ? ' ※' : '';
+  var src = r.src ? '<span class="mk mk-src" title="'+(r.srcTip||srcTagTip(r.src))+ '">'+r.src+'</span>' : '';
+  /* v2.11: 补档成功不再打标记 —— 值同样源同口径、与云端逐位一致，
+     标出来只会让人以为"这个数是临时的"。只有真需要提醒时才标记（※ / 旧时刻 / 缓存）。 */
+  var mark = r.mark ? '<span class="mk mk-lag" title="'+(r.markTip||'')+'">'+r.mark+'</span>' : '';
+  var refCell = '<td class="ref"'+(r.refTip?' title="'+r.refTip+'"':'')+'>'+(r.ref||'—')+mark+'</td>';
   return '<td class="name">'+nm+'</td>'+
     '<td class="'+(r.close==null?'miss':'')+'">'+fmt2(r.close)+'</td>'+
     '<td class="'+(r.last==null?'miss':'')+'">'+fmt2(r.last)+'</td>'+
     '<td class="'+cls(r.chg)+'">'+fmt2(r.chg,true)+'</td>'+
-    '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+flag+'</td>'+
-    '<td class="ref">'+(r.ref||'—')+'</td>';
+    '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+flag+src+'</td>'+
+    refCell;
 }
 function render(){
   var d = state.data;
@@ -355,7 +826,7 @@ function render(){
   }else{
     document.getElementById('genTime').textContent = gen ? ('数据 ' + gen) : '加载中…';
   }
-  document.getElementById('refDesc').textContent = d.ref_desc || '';
+  document.getElementById('refDesc').textContent = (d.ref_desc || '') + refLiveNote(d) + mlNote();
   var tb = document.getElementById('tbody');
   tb.innerHTML = '';
   for(var i=0;i<d.rows.length;i++){
@@ -363,13 +834,21 @@ function render(){
     if(r.name === '马棕油' && !fpoVisible()) continue;   /* v2.9: 窗口外不显示（收盘僵值无意义） */
     var q = quoteOf(r);                          /* 腾讯实时 或 TradingView 延时 */
     var last = (q && q.last!=null) ? q.last : r.last;
+    /* v2.10: 基准价 = 云端值（默认）或本页即时现算值（云端档位落后时） */
+    var bq = baseQuoteOf(r);
     var chg = r.chg, pct = r.pct;
-    if(q && r.close!=null && last!=null && r.close>0){
-      chg = last - r.close;                      /* 前端即时重算：最新价 - 起始价 */
-      pct = chg / r.close * 100;
+    if(q && bq.close!=null && last!=null && bq.close>0){
+      chg = last - bq.close;                     /* 前端即时重算：最新价 - 起始价 */
+      pct = chg / bq.close * 100;
     }
+    var stag = srcTag(r, q);
+    /* v2.11: 只有"本该有实时价"的行才标「缓存」；
+       美股三行是收盘口径（早上 9 点前看时早已收盘，不存在时效问题），不标任何小标 */
+    if(!stag && !q && r.last != null && sinaCodeOf(r)) stag = '缓存';
     var tr = document.createElement('tr');
-    tr.innerHTML = rowHtml({name:r.name, close:r.close, last:last, chg:chg, pct:pct, flag:r.flag, ref:r.ref});
+    tr.innerHTML = rowHtml({name:r.name, close:bq.close, last:last, chg:chg, pct:pct,
+                            flag:r.flag, ref:bq.ref, mark:bq.mark, markTip:bq.markTip,
+                            refTip:bq.refTip, src:stag, srcTip:srcTagTip(stag, r, q)});
     tb.appendChild(tr);
   }
   /* 上证指数临时行（仅 10:15-10:30 / 11:30-13:30 出现，见 sseRowHtml） */
@@ -694,10 +1173,15 @@ async function boot(){
   scheduleFast();                  /* ④ 之后每 15 秒刷一次腾讯 */
   refreshSina();                   /* ⑤ 6 品种准实时（新浪 Worker，立即拉一次） */
   scheduleSina();                  /* ⑥ 之后每 15 秒刷一次新浪 */
-  refreshGlobal();                 /* ⑦ 延时备份（TradingView，立即拉一次） */
-  scheduleGlobal();                /* ⑧ 之后每 60 秒刷一次 */
+  /* v2.11: TradingView 轮询已停用（延时 10-20 分钟，不符合"要当下的价"）
+     refreshGlobal();
+     scheduleGlobal(); */
   sseTick();                       /* ⑨ 上证指数临时行：窗口内立即检查一次（窗口外零开销） */
   scheduleSse();                   /* ⑩ 之后每 15 秒检查（含窗口进出判定） */
+  probeTick();                     /* ⑪ v2.10: 云端档位落后时，本页自己翻分时表补档 */
+  scheduleProbe();                 /* ⑫ v2.10: 之后每 60 秒检查一次是否需要补档 */
+  mlTick();                        /* ⑬ v2.11: 新浪快照通道异常时，用分时表接管那 6 个品种 */
+  scheduleMl();                    /* ⑭ v2.11: 之后每 15 秒检查一次 */
 }
 boot();
 jsonTimer = setInterval(loadJson, JSON_MS);   /* 每 60 秒检查一遍起始价是否更新 */
@@ -710,16 +1194,21 @@ document.addEventListener('visibilitychange', function(){
     clearTimeout(gqTimer); gqTimer = null;
     clearTimeout(snTimer); snTimer = null;
     clearTimeout(sseTimer); sseTimer = null;
+    clearTimeout(probeTimer); probeTimer = null;
+    clearTimeout(mlTimer); mlTimer = null;
   }else{
     loadJson();
     refreshTx();
     refreshSina();
-    refreshGlobal();
+    /* v2.11: refreshGlobal(); 已停用（延时源） */
     sseTick();
+    probeTick();
+    mlTick();
     scheduleFast();
     scheduleSina();
-    scheduleGlobal();
     scheduleSse();
+    scheduleProbe();
+    scheduleMl();
     if(!jsonTimer) jsonTimer = setInterval(loadJson, JSON_MS);
   }
 });
