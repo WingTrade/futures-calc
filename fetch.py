@@ -2,6 +2,17 @@
 """
 外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.13）
 ======================================================
+  - 换月检测判据重写（v1.14）：
+      · 新判据：**最新价是否跑到【当段分时表】的价格区间之外**（±0.5% 容差）。
+        同一段分时表必然是同一个合约 → 最新价理应落在它的 [min,max] 内；
+        跑出去就说明两个数据源切合约不同步 = 换月。
+      · 为什么废掉旧判据：新浪日K在换月点附近【自身数据矛盾】（实测布伦特 10-02 那根
+        "低>开"、伦铝 10-09 那根"高<开"），拿它当区间不可靠；而且"最近 2 根"
+        会把换月前那根【老合约】包进来、把区间撑宽 → 系统性漏检（回测 2/4 漏检）。
+      · 新增手工覆盖表 ROLLOVER_OVERRIDE（自动检测失灵时按品种强制按换月处理）。
+      · 修正动作不变：参考价 := 昨结算；起始时间列标「昨结 换月」。
+      · 保护：分时表点数 < 3、区间幅度 < 0.2%、或表末根距今 > 30 分钟（时段已滚动）时不判。
+
 v1.13 更新（2026-10-16 · 海鸥工作区）：
   - 美原糖改为与所有品种统一口径：**基准 = 国内 15:00 收盘时刻的价**。
     原糖 15:00 那一刻没有成交（它 15:30 才开盘）→ day 档取"15:00 之后的第一笔"（≈它今天开盘价），
@@ -154,6 +165,10 @@ NAME_ALIAS_MAP = {
     '美国棉花': '美棉花',
     '美国天然气': '美天然气',
 }
+
+# v1.14: 手工换月覆盖表 {品种名: True} —— 自动检测失灵时，把品种名填进来即可强制按换月处理
+#   （基准 := 昨结算，起始时间列标「昨结 换月」）。
+ROLLOVER_OVERRIDE = {}
 
 VARIETIES = [
     ('WTI原油(23:00)',    'M23',   '102.CL00Y',  'hf_CL'),
@@ -399,6 +414,33 @@ def sina_dailyk_closed_bar(symbol, now, exclude_today=False):
         except (ValueError, KeyError, TypeError):
             return None, None
     return None, None
+
+def rollover_suspect(bars, last, now, tol=0.005, min_span=0.002, max_age_min=30):
+    """v1.14: 换月嫌疑判定 —— 最新价是否跑到【当段分时表】的价格区间之外。
+
+    原理（物理必然）：同一段分时表 = 同一个合约，所以"当前所有成交价"必然落在
+    该分时表的 [min, max] 之内。若"最新价"跑出去了，说明参考价所在的数据源与
+    最新价所在的数据源切合约不同步 —— 这就是换月。
+
+    为什么不用日K区间（v1.9 的老判据）：
+      · 新浪日K在换月点附近【自身数据矛盾】（实测：布伦特 10-02 那根"低>开"，
+        伦铝 10-09 那根"高<开"），拿它当区间不可靠；
+      · 且"最近 2 根"会把换月前那根【老合约】包进来，区间被撑宽 → 系统性漏检。
+
+    返回 (是否可疑, 说明文字)。"""
+    if not bars or last is None or len(bars) < 3:
+        return False, ''
+    lo = min(p for _dt, p in bars)
+    hi = max(p for _dt, p in bars)
+    if hi <= 0 or (hi - lo) / hi < min_span:
+        return False, ''            # 区间过窄（表刚重置 / 极稀疏）→ 不可靠，不判
+    last_dt = bars[-1][0]
+    age_min = (now - last_dt).total_seconds() / 60.0
+    if age_min > max_age_min:
+        return False, ''            # 表本身已经"不新鲜"（如时段已滚动）→ 不是换月，不判
+    if lo * (1 - tol) <= last <= hi * (1 + tol):
+        return False, ''
+    return True, '最新价 %s 落在分时表区间 [%s, %s] 之外' % (last, lo, hi)
 
 def sina_dailyk_highlow_range(symbol, n=2):
     """v1.9: 取最近 n 根日K的 [min(low), max(high)]，供换月检测的区间校验用。
@@ -979,30 +1021,24 @@ def main():
     # ---------------- v1.9：换月检测（参考价失真自动修正） ----------------
     # 主连换月时，若"参考时点"落在换月前（参考价=老合约价），而行情已切到新合约，
     # 页面涨跌幅会失真（例：2026-10-16 美燃油 老合约 4.834 vs 新合约 4.596，
-    # 显示假跌 -4.9%，实际约 -1.3%）。双条件同时满足才修正（防误伤正常大波动日）：
+    # 显示假跌 -4.9%，实际约 -1.3%）。v1.14 起判据已重写（见 rollover_suspect）：
     #   ① 参考价与快照"昨结算"（当前合约）偏离 > 2%；
     #   ② 参考价不在最近 2 根日K的 [min(low), max(high)] 区间内（±0.5% 容差）。
     # 修正：参考价 := 昨结；ref := '昨结'（页面"起始时间"列显示该标注）；note := '换月'。
     month_fix = 0
     for row in rows:
         code = row.get('code')
-        if not code or row.get('close') is None or code not in sina_map:
+        if not code or row.get('close') is None:
             continue
-        ps = sina_map[code].get('prev_settle')
-        if not ps or ps <= 0:
+        # v1.14：判据改为"分时表同段一致性"（不再看日K，也不再依赖 2% 阈值）
+        sym = code[3:] if code.startswith('hf_') else code
+        suspect, why = rollover_suspect(ml_by_sym.get(sym) or [], row.get('last'), now)
+        if not suspect and row['name'] in ROLLOVER_OVERRIDE:
+            suspect, why = True, '手工覆盖表指定'
+        ps = (sina_map.get(code) or {}).get('prev_settle')
+        if not suspect or not ps or ps <= 0:
             continue
         close = row['close']
-        if abs(close - ps) / ps <= 0.02:
-            continue                                     # 条件①未命中
-        sym = code[3:] if code.startswith('hf_') else code
-        rng = sina_dailyk_highlow_range(sym, 2)
-        if not rng:
-            continue                                     # 取不到日K → 不冒险，跳过
-        lo, hi = rng
-        if code in SINA_CENT_TO_DOLLAR:                  # 口径统一（美铜日K为美分）
-            lo, hi = lo / 100.0, hi / 100.0
-        if lo * 0.995 <= close <= hi * 1.005:
-            continue                                     # 条件②未命中（在正常区间内）
         row['close'] = ps
         row['ref'] = '昨结 换月'
         row['note'] = '换月'
@@ -1012,7 +1048,7 @@ def main():
             row['chg'] = row['last'] - ps
             row['pct'] = row['chg'] / ps * 100
         month_fix += 1
-        print(f"换月修正: {row['name']} 参考价 {close} -> 昨结 {ps}")
+        print(f"换月修正: {row['name']} 参考价 {close} -> 昨结 {ps}（{why}）")
     if month_fix:
         print(f'换月检测: {month_fix} 行已修正')
     else:

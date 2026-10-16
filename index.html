@@ -134,7 +134,7 @@
   </div>
   <div class="tip">实时最新价 · 新浪/腾讯双通道每 15 秒刷新 · 起始价按节点定时更新</div>
   <div class="tip">双绿灯，全部品种均为实时；红灯异常时，部分品种降级为延时</div>
-  <div class="tip" id="tipMark">平时表格是干净的：「起始时间」列 = 该品种实际取到那一笔价的时刻，与整点档位不同时才打 ※（悬停看细节）·只有"这行的价确实是旧时刻的"才标出时刻（如「分时 14:11」）·三条实时路都没拿到时标「缓存」</div>
+  <div class="tip" id="tipMark">「起始时间」列 = 该品种实际取到那一笔价的时刻（成交稀疏的品种会比整点早或晚几分钟，属正常）·只有"这行的价确实是旧时刻的"才标出时刻（如「分时 14:11」）·三条实时路都没拿到时标「缓存」</div>
 </div>
 
 <script>
@@ -150,7 +150,7 @@
    v2.10：三处增量（其余与 v2.9 一致）：
      ① 「起始时间」说真话：显示该行【实际取到那一笔价】的时刻（云端 data.json 新增 ref_actual /
         gap_min 字段）。此前显示的是档位节点（如 11:30），但稀疏品种实际取的是更早的最后一笔
-        （美豆粕 14:46、日橡胶 14:11…），拿去分钟图上反查会对不上。两者不同时打 ※ 并悬停提示。
+        （美豆粕 14:46、日橡胶 14:11…），拿去分钟图上反查会对不上。只显示真实时刻，不加小标。
         兼容：云端未换脚本时没有这两个字段 → 行为与 v2.9 完全相同。
      ② 最新价来源标记：走 TradingView 延时兜底、或美燃油（腾讯只有延时源 fuHO）的行，
         涨跌幅后标「延」，避免把 10-20 分钟的延时数据当成实时看。
@@ -546,16 +546,10 @@ function baseQuoteOf(r){
        标出来只会让人怀疑"这个数是不是临时的"。只有"算不出来"的情况才需要说明。 */
     return { close: (v == null ? null : v), ref: refTxt, mark: '', markTip: '', refTip: '' };
   }
-  var gap = (typeof r.gap_min === 'number') ? r.gap_min : null;
-  var mark = '', tip = '';
-  if(r.ref_actual && gap !== null && Math.abs(gap) >= 3){
-    mark = '※';
-    tip = '档位节点 ' + (r.ref || '') + '，实际取到那一笔价是 ' + r.ref_actual + '（' +
-          (gap < 0 ? '该品种在节点时刻还没开盘，取的是之后的第一笔'
-                   : '该品种成交稀疏，节点附近那一分钟没有成交') +
-          '，相差 ' + Math.abs(gap) + ' 分钟）';
-  }
-  return { close: r.close, ref: r.ref_actual || r.ref, mark: mark, markTip: tip, refTip: tip };
+  /* v2.13（用户要求）：取消 ※ 小标与悬停说明 ——「起始时间」列已经把真实取价笔显示出来了，
+     看着时间就能明白，不需要额外小标。豆粕这类成交稀疏是正常现象（可容错），
+     原糖这类"节点时刻还没开盘"也同样：时间列显示 15:30 一看就懂。 */
+  return { close: r.close, ref: r.ref_actual || r.ref, mark: '', markTip: '', refTip: '' };
 }
 /* 最新价来源标记：延时源（TradingView 兜底 / 美燃油 fuHO） */
 function srcTag(r, q){
@@ -790,10 +784,10 @@ function saveCache(d){
 /* ---------- 渲染 ---------- */
 function rowHtml(r){
   var nm = SHORT_NAMES[r.name] || r.name;
-  var flag = r.flag ? ' ※' : '';
+  var flag = '';   /* v2.13: 取消 ※ 小标 ——「起始时间」列已显示真实取价笔，用户要求去掉 */
   var src = r.src ? '<span class="mk mk-src" title="'+(r.srcTip||srcTagTip(r.src))+ '">'+r.src+'</span>' : '';
   /* v2.11: 补档成功不再打标记 —— 值同样源同口径、与云端逐位一致，
-     标出来只会让人以为"这个数是临时的"。只有真需要提醒时才标记（※ / 旧时刻 / 缓存）。 */
+     标出来只会让人以为"这个数是临时的"。只有真需要提醒时才标记（旧时刻 / 缓存）。 */
   var mark = r.mark ? '<span class="mk mk-lag" title="'+(r.markTip||'')+'">'+r.mark+'</span>' : '';
   var refCell = '<td class="ref"'+(r.refTip?' title="'+r.refTip+'"':'')+'>'+(r.ref||'—')+mark+'</td>';
   return '<td class="name">'+nm+'</td>'+
