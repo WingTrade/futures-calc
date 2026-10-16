@@ -133,7 +133,11 @@
 
 <script>
 /* =====================================================================
-   外盘涨跌统计 · 前端 v2.7（2026-10-15）
+   外盘涨跌统计 · 前端 v2.8（2026-10-16）
+   v2.8：头部「实时」时间戳改为按「数据日期+时间」比较（腾讯 f[12] / 新浪 f[12] 提供日期）。
+         旧版仅比较 HH:MM:SS 字符串，跨午夜后会把昨晚的 22:59:57（如马棕油昨日收盘）
+         误判为"最新"，导致早上打开页面头部一直显示「实时 22:59:57」。
+         现在：今天的数据显示「实时 HH:MM:SS」；隔天的显示「最后 MM-DD HH:MM:SS」。
    数据流：
      起始价/参考时间  ← data.json（GitHub Actions 云端按收盘节点定时生成，含复杂时段判定）
      最新价（准实时）  ← 新浪 hq.sinajs.cn，经自建 Cloudflare 双通道中转：
@@ -226,6 +230,11 @@ function todayKey(){
   var d = new Date();
   return '' + d.getFullYear() + pad2(d.getMonth()+1) + pad2(d.getDate());
 }
+/* v2.8：今天的日期（YYYY-MM-DD），用于判断头部时间戳是否当天的数据 */
+function todayYmd(){
+  var d = new Date();
+  return d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate());
+}
 function nowSec(){
   var d = new Date();
   return d.getHours()*3600 + d.getMinutes()*60 + d.getSeconds();
@@ -239,7 +248,7 @@ function ssePhase(){
 }
 
 /* ---------- 状态 ---------- */
-var state = { data:null, tx:null, txTime:'', txFail:0, sn:{}, snTime:'', snFail:0, gq:{},
+var state = { data:null, tx:null, txTime:'', txDate:'', txFail:0, sn:{}, snTime:'', snDate:'', snFail:0, gq:{},
               sse:null, sseLive:null, sseTryAt:0, sseErr:'' };
 var txBusy = false, jsonBusy = false, gqBusy = false, snBusy = false;
 var sseBaseBusy = false, sseLiveBusy = false, sseActive = false;
@@ -283,7 +292,9 @@ function loadCache(){
       if(o.sn) state.sn = o.sn;
       if(o.tx) state.tx = o.tx;
       if(o.txTime) state.txTime = o.txTime;
+      if(o.txDate) state.txDate = o.txDate;
       if(o.snTime) state.snTime = o.snTime;
+      if(o.snDate) state.snDate = o.snDate;
     }
   }catch(e){}
 }
@@ -291,7 +302,8 @@ function saveCache(d){
   try{
     localStorage.setItem(CACHE_KEY, JSON.stringify({
       ts:Date.now(), data:d,
-      sn:state.sn, tx:state.tx, txTime:state.txTime, snTime:state.snTime
+      sn:state.sn, tx:state.tx, txTime:state.txTime, txDate:state.txDate,
+      snTime:state.snTime, snDate:state.snDate
     }));
   }catch(e){}
 }
@@ -312,10 +324,21 @@ function render(){
   if(!d || !d.rows) return;
   document.getElementById('title').textContent = d.title || (d.mode==='day' ? '对比15:00涨跌统计（日间）' : '隔夜涨跌统计');
   var gen = hhmm(d.generated_at);
-  var tShow = state.txTime;                                     /* 头部时间取腾讯/新浪两通道中较新的时戳 */
-  if(state.snTime && (!tShow || state.snTime > tShow)) tShow = state.snTime;
-  if(tShow){
-    document.getElementById('genTime').textContent = '实时 ' + tShow;
+  /* v2.8: 头部时间取腾讯/新浪两通道中真正最新的一条 —— 按「数据日期+时间」比较，
+     跨午夜后仅比较 HH:MM:SS 会把昨晚 22:59:57 当"最新"（如马棕油昨日收盘）。
+     当天的数据显示「实时」，隔天的数据显式标出日期（「最后 10-15 22:59:57」）。 */
+  var bestT = '', bestD = '';
+  if(state.txTime){ bestT = state.txTime; bestD = state.txDate || ''; }
+  if(state.snTime){
+    var snKey = (state.snDate || '') + ' ' + state.snTime;
+    if(!bestT || snKey > (bestD + ' ' + bestT)){ bestT = state.snTime; bestD = state.snDate || ''; }
+  }
+  if(bestT){
+    if(!bestD || bestD === todayYmd()){
+      document.getElementById('genTime').textContent = '实时 ' + bestT;
+    }else{
+      document.getElementById('genTime').textContent = '最后 ' + bestD.slice(5) + ' ' + bestT;
+    }
   }else{
     document.getElementById('genTime').textContent = gen ? ('数据 ' + gen) : '加载中…';
   }
@@ -492,31 +515,37 @@ async function refreshTx(){
     if(!resp.ok) throw new Error('HTTP '+resp.status);
     var text = await resp.text();   /* 响应头 charset=GBK，浏览器自动按 GBK 解码 */
     var re = /v_(hf_\w+|fu\w+)="([^"]*)"/g, m;
-    var tx = {}, maxT = '';
+    var tx = {}, maxT = '', maxD = '';
     while((m = re.exec(text))){
       var code = m[1], body = m[2];
-      var last = null, tstr = '';
+      var last = null, tstr = '', dstr = '';
       if(code.indexOf('fu') === 0){
         /* 波浪格式（延时行情，时间戳为美东时区）：f[3]=最新价、f[30]=时间 */
         var fb = body.split('~');
         if(fb.length > 30 && fb[3]){ last = parseFloat(fb[3]); tstr = fb[30] || ''; }
       }else{
-        /* 逗号格式（实时，时间戳为北京时间）：f[0]=最新价、f[6]=时间 */
+        /* 逗号格式（实时，时间戳为北京时间）：f[0]=最新价、f[6]=时间、f[12]=数据日期 */
         var fc = body.split(',');
         if(fc.length > 12 && fc[0]){
           last = parseFloat(fc[0]);
           if(code === 'hf_HG') last = last / 100;   /* 美铜：接口为美分/磅，页面用美元/磅（与 data.json 同口径） */
           tstr = fc[6] || '';
+          dstr = fc[12] || '';   /* v2.8: 数据日期，跨午夜比较用 */
         }
       }
       if(last == null || isNaN(last)) continue;
       tx[code] = { last:last, time:tstr };
-      /* 头部「实时」时间只取实时通道（hf_ 系）的时间戳，延时品种不参与比较 */
-      if(code.indexOf('fu') !== 0 && tstr > maxT) maxT = tstr;
+      /* 头部「实时」时间只取实时通道（hf_ 系）的时间戳，延时品种不参与比较；
+         v2.8: 按「日期+时间」比较，避免昨晚 22:59:57 盖过今天的时间戳 */
+      if(code.indexOf('fu') !== 0){
+        var key = dstr + ' ' + tstr;
+        if(key > (maxD + ' ' + maxT)){ maxT = tstr; maxD = dstr; }
+      }
     }
     if(!Object.keys(tx).length) throw new Error('empty');
     state.tx = tx;
     state.txTime = maxT;
+    state.txDate = maxD;
     state.txFail = 0;
     setLamp('dotTx','lblTx', true);
     render();
@@ -570,20 +599,23 @@ async function refreshSina(){
     if(text == null) throw new Error('all proxies failed');
     /* 响应字节为 GBK；数字/引号/逗号均为 ASCII，即使按 UTF-8 误读也不影响字段解析 */
     var re = /hq_str_(hf_\w+)="([^"]*)"/g, m;
-    var sn = {}, maxT = '';
+    var sn = {}, maxT = '', maxD = '';
     while((m = re.exec(text))){
       var code = m[1], fb = m[2].split(',');
       if(fb.length > 12 && fb[0]){
-        var last = parseFloat(fb[0]);       /* 逗号格式：f[0]=最新价、f[6]=时间（北京时间） */
+        var last = parseFloat(fb[0]);       /* 逗号格式：f[0]=最新价、f[6]=时间、f[12]=数据日期（北京时间） */
         if(isNaN(last)) continue;
         var tstr = fb[6] || '';
+        var dstr = fb[12] || '';            /* v2.8: 数据日期（如马棕油昨日收盘 22:59:57 属前一日） */
         sn[code] = { last:last, time:tstr };
-        if(tstr > maxT) maxT = tstr;
+        var key = dstr + ' ' + tstr;
+        if(key > (maxD + ' ' + maxT)){ maxT = tstr; maxD = dstr; }
       }
     }
     if(!Object.keys(sn).length) throw new Error('empty');
     state.sn = sn;
     if(maxT) state.snTime = maxT;
+    if(maxD) state.snDate = maxD;
     state.snFail = 0;
     setLamp('dotSina','lblSina', true);
     render();

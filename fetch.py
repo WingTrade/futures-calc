@@ -1,7 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.7）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.8）
 ======================================================
+v1.8 更新（2026-10-16）：
+  - 新增「取不到价时的续接」：某品种本轮取不到参考价（close 仍为空）时，
+    从上一版 data.json 继承【同一参考时点（ref 相同）】的旧值，不再把上一轮
+    已取到的好数据覆盖成空。解决场景：轮次跑在"分时时段切换"之后
+    （CME 纽约盘 06:00 切换、ICE/CBOT/LME 08:00 切换，旧时段数据被顶掉），
+    如 05:50 轮常被 GitHub 排队延迟到 06:05+，导致 WTI/黄金/白银/铜/燃油/天然气
+    集体丢参考价。美股三指数接口失败时按名称整体沿用上一版（避免清空）。
+  - 新增 --us-only 轻量模式：只重取美股三行（3 个请求、约 10 秒），
+    供清晨 07:45 轮"美股日线定格"用（新浪美股日K更新晚于 05:30 判据，
+    05:35/05:50 轮拿不到新日线，靠白天轮次补太晚）。其他行与 generated_at 不动；
+    美股行无变化时不写文件、不产生提交。
+
 v1.7 更新（2026-10-15）：
   - 新增白天两档参考时点（配套国内日盘作息）：10:15 档（10:15-11:30，含 10:15 休息段；
     10:30 开盘后不切换、连续对比到 11:30）与 11:30 档（11:30-15:00，含午休段）。
@@ -554,6 +566,26 @@ def main():
             kline_fail += 1
     print(f'K线: 成功 {len(secids) - kline_fail}/{len(secids)}')
 
+    # v1.8: 读上一版 data.json（Actions 里 = 上一轮提交的版本），供"取不到价时续接"用。
+    # 普通品种按 name+ref 精确匹配；铁矿等特判分支会在行组装时提前用到 prev_by_key。
+    prev_rows = []
+    prev_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data.json')
+    try:
+        with open(prev_path, encoding='utf-8') as f:
+            prev_rows = (json.load(f) or {}).get('rows') or []
+        print(f'续接: 读到上一版 data.json, {len(prev_rows)} 行')
+    except Exception:
+        prev_rows = []
+        print('续接: 无上一版 data.json（首次运行）')
+    prev_by_key = {}
+    prev_by_name = {}
+    for _r in prev_rows:
+        if _r.get('close') is None:
+            continue
+        if _r.get('ref'):
+            prev_by_key[(_r.get('name'), _r.get('ref'))] = _r
+        prev_by_name.setdefault(_r.get('name'), _r)
+
     # 组装行
     rows = []
     for name, group, secid, sina_code in VARIETIES:
@@ -669,6 +701,13 @@ def main():
                     close, st = ref_price_from_bars(bars, ref_dt, max_gap_hours=10, now=now)
                 except Exception:
                     close = None
+            # v1.8: 日K兜底会把口径降级为"时段起点"（如 20:00），优先继承上一版
+            # 同参考时点（如 10-15 23:00）的旧值，保持口径一致
+            if close is None and ref_dt is not None:
+                _p = prev_by_key.get((name, f'{ref_dt:%m-%d %H:%M}'))
+                if _p is not None:
+                    close = _p['close']
+                    note = '继'
             if close is None and ref_dt is not None:
                 try:
                     close, ref_show = fef_ref_from_dailyk(ref_dt)
@@ -720,6 +759,38 @@ def main():
             'ref': ref_text if ref_text is not None else (f'{ref_show:%m-%d %H:%M}' if ref_show else None),
         })
 
+    # ---------------- v1.8：取不到价的续接（后处理） ----------------
+    # 场景：轮次跑在"分时时段切换"之后（CME 纽约盘 06:00 起新时段、ICE/CBOT/LME 08:00 起），
+    # 旧时段的参考点（23:00 / 01:00 / 02:30 等）已不在"当日分时"里；若东财 K 线也被限流，
+    # close 会取空 —— 此时从上一版 data.json 继承同一参考时点（name+ref 完全一致）的旧值，
+    # 避免把上一轮已取到的好数据覆盖成空。
+    # 美股三指数：接口临时失败（不足 2 根日线）时按名称整体沿用上一版，避免行被清空。
+    us_index_names = {'标准普尔', '道琼工业', '纳斯达克'}
+    inherit_n = 0
+    for row in rows:
+        if row['close'] is not None:
+            continue
+        p = None
+        if row.get('ref'):
+            p = prev_by_key.get((row['name'], row['ref']))
+        if p is None and row['name'] in us_index_names:
+            p = prev_by_name.get(row['name'])
+            if p is not None and not row.get('ref'):
+                row['ref'] = p.get('ref')   # 美股行整体沿用（含参考日期标签）
+        if p is None:
+            continue
+        row['close'] = p['close']
+        if row['last'] is None:
+            row['last'] = p.get('last')
+        if row.get('note') == '缺':
+            row['note'] = '继'
+        if row['close'] is not None and row['last'] is not None and row['close'] > 0:
+            row['chg'] = row['last'] - row['close']
+            row['pct'] = row['chg'] / row['close'] * 100
+        inherit_n += 1
+    if inherit_n:
+        print(f'续接: {inherit_n} 行继承上一版数据')
+
     em_ok = em_snap_ok and kline_fail < 3
     mode_title = {'day': '对比15:00涨跌统计（日间）',
                   'm1015': '对比10:15涨跌统计',
@@ -742,5 +813,58 @@ def main():
     print(f'完成: {ok_n}/{len(rows)} 个品种有涨跌幅, 耗时 {time.time() - t0:.0f} 秒')
     print(f'已写入 {out}')
 
+def main_us_only():
+    """v1.8：--us-only 轻量模式 —— 只重取美股三行（标普/道指/纳指）。
+    用途：清晨 07:45 轮补最新已收盘日线（新浪美股日K更新晚于 05:30 判据）。
+    其他行、generated_at 均保持不动；美股行无变化时不写文件（git 不产生提交）。
+    日线「已收盘」判据与主流程一致（日线日期次日北京 05:30 之后）。"""
+    t0 = time.time()
+    now = now_cn()
+    print(f'us-only 模式 · 当前北京时间: {now:%Y-%m-%d %H:%M:%S}')
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data.json')
+    try:
+        with open(out, encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f'读取 data.json 失败({type(e).__name__})，退出')
+        return
+    idx_secid = {name: sid for name, group, sid, sina_code in VARIETIES if sid in US_INDEX_MAP}
+    changed = 0
+    for row in data.get('rows', []):
+        secid = idx_secid.get(row.get('name'))
+        if secid is None:
+            continue
+        try:
+            bars_us = us_index_daily_bars(US_INDEX_MAP[secid], now, 2)
+        except Exception as e:
+            bars_us = []
+            print(f"{row['name']}: 日K接口失败({type(e).__name__})")
+        if len(bars_us) < 2:
+            print(f"{row['name']}: 已收盘日线不足 2 根，跳过")
+            continue
+        (d_prev, c_prev), (d_last, c_last) = bars_us
+        new_ref = f'{d_last[5:]}美'
+        if (row.get('close') != c_prev or row.get('last') != c_last
+                or row.get('ref') != new_ref):
+            row['close'], row['last'] = c_prev, c_last
+            row['ref'] = new_ref
+            row['chg'] = c_last - c_prev
+            row['pct'] = row['chg'] / c_prev * 100 if c_prev else None
+            row['flag'] = False
+            row['note'] = ''
+            changed += 1
+            print(f"{row['name']}: -> {new_ref} 收盘={c_prev} 最新={c_last}")
+        else:
+            print(f"{row['name']}: 无变化（{new_ref}）")
+    if changed:
+        with open(out, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        print(f'us-only 完成: {changed} 行更新, 已写入 {out}, 耗时 {time.time() - t0:.0f} 秒')
+    else:
+        print('us-only 完成: 无变化，不写文件')
+
 if __name__ == '__main__':
-    main()
+    if '--us-only' in sys.argv:
+        main_us_only()
+    else:
+        main()
