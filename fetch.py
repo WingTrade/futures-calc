@@ -1,7 +1,17 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.8）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.9）
 ======================================================
+v1.9 更新（2026-10-16）：
+  - 新增「换月检测」：主连换月时，若参考时点落在换月前（参考价=老合约），
+    而行情已切到新合约，页面涨跌幅会失真（例：10-16 美燃油 老合约 4.834
+    vs 新合约 4.596，显示假跌 -4.9%，实际约 -1.3%）。
+    双条件同时满足才修正（防误伤正常大波动日）：
+      ① 参考价与快照"昨结算"（当前合约）偏离 > 2%；
+      ② 参考价不在最近 2 根日K的 [min(low), max(high)] 区间内（±0.5% 容差）。
+    修正动作：参考价 := 昨结；起始时间列标注「昨结」；note 记「换月」。
+    （美铜日K为美分口径，检测时按 SINA_CENT_TO_DOLLAR 统一换算。）
+
 v1.8 更新（2026-10-16）：
   - 新增「取不到价时的续接」：某品种本轮取不到参考价（close 仍为空）时，
     从上一版 data.json 继承【同一参考时点（ref 相同）】的旧值，不再把上一轮
@@ -331,6 +341,32 @@ def sina_dailyk_closed_bar(symbol, now, exclude_today=False):
             return None, None
     return None, None
 
+def sina_dailyk_highlow_range(symbol, n=2):
+    """v1.9: 取最近 n 根日K的 [min(low), max(high)]，供换月检测的区间校验用。
+    失败返回 None（调用方跳过检测，不影响主流程）。"""
+    u = ('https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20d=/'
+         f'GlobalFuturesService.getGlobalFuturesDailyKLine?symbol={symbol}')
+    try:
+        txt = http_get(u, SINA_HEADERS)
+        m = re.search(r'\((\[.*\])\)', txt, re.S)
+        if not m:
+            return None
+        arr = json.loads(m.group(1))
+    except Exception:
+        return None
+    if not isinstance(arr, list) or len(arr) < n:
+        return None
+    lows, highs = [], []
+    for k in arr[-n:]:
+        try:
+            lows.append(float(k['low']))
+            highs.append(float(k['high']))
+        except (ValueError, KeyError, TypeError):
+            continue
+    if not lows:
+        return None
+    return min(lows), max(highs)
+
 def us_index_daily_bars(symbol, now, n=2):
     """v1.3: 取最近 n 根【已收盘】美股指数日线 → [(日期str, 收盘价), ...]（时间升序，新的在后）。
     已收盘判据：日线日期(美东)的次日北京 05:30 之后（覆盖夏/冬令时收盘时间差）。"""
@@ -359,6 +395,21 @@ def us_index_daily_bars(symbol, now, n=2):
                 break
     out.reverse()
     return out
+
+def us_ref_date(ref, today):
+    """v1.9: 解析美股行 ref（如 '10-15美'）为 date，按"最近原则"归属年份（跨年安全）。
+    解析失败返回 None。用于"防回退"比较：本轮算出的日线不该比上一版更旧。"""
+    m = re.match(r'^(\d{2})-(\d{2})美$', ref or '')
+    if not m:
+        return None
+    mm, dd = int(m.group(1)), int(m.group(2))
+    try:
+        d = today.replace(month=mm, day=dd)
+        if d > today + timedelta(days=7):
+            d = d.replace(year=today.year - 1)
+        return d
+    except ValueError:
+        return None
 
 def fef_ref_from_dailyk(ref_dt):
     dk = sina_fef_dailyk()
@@ -791,6 +842,68 @@ def main():
     if inherit_n:
         print(f'续接: {inherit_n} 行继承上一版数据')
 
+    # ---------------- v1.9：美股防回退 ----------------
+    # 数据源偶尔会撤回"最近一根日线"（如 2026-10-16 新浪 .INX 短暂撤下 10-15 那根，
+    # 5736→5735 根），导致页面倒退回前一天。市场数据只向前：
+    # 若本轮算出的最新日线比上一版 data.json 的更旧，则保留上一版整行。
+    rollback_keep = 0
+    for row in rows:
+        if row['name'] not in us_index_names:
+            continue
+        p = prev_by_name.get(row['name'])
+        if not p or p.get('close') is None:
+            continue
+        cur_d = us_ref_date(row.get('ref'), now.date())
+        old_d = us_ref_date(p.get('ref'), now.date())
+        if cur_d and old_d and cur_d < old_d:
+            row['close'], row['last'] = p['close'], p.get('last')
+            row['ref'], row['chg'], row['pct'] = p.get('ref'), p.get('chg'), p.get('pct')
+            row['note'] = '防退'
+            rollback_keep += 1
+            print(f"防回退: {row['name']} 本轮源数据({cur_d})落后于上一版({p.get('ref')})，保留上一版")
+    if rollback_keep:
+        print(f'美股防回退: {rollback_keep} 行保留上一版')
+
+    # ---------------- v1.9：换月检测（参考价失真自动修正） ----------------
+    # 主连换月时，若"参考时点"落在换月前（参考价=老合约价），而行情已切到新合约，
+    # 页面涨跌幅会失真（例：2026-10-16 美燃油 老合约 4.834 vs 新合约 4.596，
+    # 显示假跌 -4.9%，实际约 -1.3%）。双条件同时满足才修正（防误伤正常大波动日）：
+    #   ① 参考价与快照"昨结算"（当前合约）偏离 > 2%；
+    #   ② 参考价不在最近 2 根日K的 [min(low), max(high)] 区间内（±0.5% 容差）。
+    # 修正：参考价 := 昨结；ref := '昨结'（页面"起始时间"列显示该标注）；note := '换月'。
+    month_fix = 0
+    for row in rows:
+        code = row.get('code')
+        if not code or row.get('close') is None or code not in sina_map:
+            continue
+        ps = sina_map[code].get('prev_settle')
+        if not ps or ps <= 0:
+            continue
+        close = row['close']
+        if abs(close - ps) / ps <= 0.02:
+            continue                                     # 条件①未命中
+        sym = code[3:] if code.startswith('hf_') else code
+        rng = sina_dailyk_highlow_range(sym, 2)
+        if not rng:
+            continue                                     # 取不到日K → 不冒险，跳过
+        lo, hi = rng
+        if code in SINA_CENT_TO_DOLLAR:                  # 口径统一（美铜日K为美分）
+            lo, hi = lo / 100.0, hi / 100.0
+        if lo * 0.995 <= close <= hi * 1.005:
+            continue                                     # 条件②未命中（在正常区间内）
+        row['close'] = ps
+        row['ref'] = '昨结'
+        row['note'] = '换月'
+        if row['last'] is not None:
+            row['chg'] = row['last'] - ps
+            row['pct'] = row['chg'] / ps * 100
+        month_fix += 1
+        print(f"换月修正: {row['name']} 参考价 {close} -> 昨结 {ps}")
+    if month_fix:
+        print(f'换月检测: {month_fix} 行已修正')
+    else:
+        print('换月检测: 未发现疑似换月失真')
+
     em_ok = em_snap_ok and kline_fail < 3
     mode_title = {'day': '对比15:00涨跌统计（日间）',
                   'm1015': '对比10:15涨跌统计',
@@ -844,6 +957,12 @@ def main_us_only():
             continue
         (d_prev, c_prev), (d_last, c_last) = bars_us
         new_ref = f'{d_last[5:]}美'
+        # v1.9: 防回退 —— 本轮日线若比 data.json 现有的更旧（源数据撤回抖动），跳过不动
+        cur_d = us_ref_date(new_ref, now.date())
+        old_d = us_ref_date(row.get('ref'), now.date())
+        if cur_d and old_d and cur_d < old_d:
+            print(f"{row['name']}: 日线回退保护（本轮 {new_ref} 落后于现有 {row.get('ref')}），跳过")
+            continue
         if (row.get('close') != c_prev or row.get('last') != c_last
                 or row.get('ref') != new_ref):
             row['close'], row['last'] = c_prev, c_last
