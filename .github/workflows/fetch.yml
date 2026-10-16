@@ -11,7 +11,8 @@ on:
     - cron: '2 15 * * *'   # 北京 23:02 · 夜盘普通品种收盘（23:00 节点）
     - cron: '2 17 * * *'   # 北京 01:02（凌晨）· LME 有色收盘（01:00 节点）
     - cron: '32 18 * * *'  # 北京 02:32（凌晨）· 贵金属收盘（02:30 节点）
-    - cron: '50 21 * * *'  # 北京 05:50（凌晨）· 美股日线定格（05:30 后）+ 夜间汇总兜底
+    - cron: '35 21 * * *'  # 北京 05:35（凌晨）· 夜盘汇总兜底（原 05:50 提前，避开 CME 06:00 分时切换窗口，防参考价被顶掉）
+    - cron: '45 23 * * *'  # 北京 07:45 · 美股日线定格（轻量：只更新美股三行；新浪美股日K更新晚于 05:30 判据，此时补最新）
   workflow_dispatch:       # 手动触发：随时想看最新数据，Actions 页点 Run workflow，约 2 分钟后刷新网页即可
 
 permissions:
@@ -27,8 +28,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: 拉取数据
+      - name: 拉取数据（全量）
+        if: github.event.schedule != '45 23 * * *'
         run: python fetch.py
+
+      - name: 拉取数据（美股专项 · 07:45 轮）
+        if: github.event.schedule == '45 23 * * *'
+        run: python fetch.py --us-only
 
       - name: 提交数据
         run: |
