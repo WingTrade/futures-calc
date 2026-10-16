@@ -133,7 +133,10 @@
 
 <script>
 /* =====================================================================
-   外盘涨跌统计 · 前端 v2.8（2026-10-16）
+   外盘涨跌统计 · 前端 v2.9（2026-10-16）
+   v2.9：马棕油（BMD）显示窗口 —— 它 23:00 收盘、次日 10:30 才开盘，中间无波动；
+         仅在【工作日 10:30-23:00】显示该行（早上隔夜档的收盘僵值无参考意义），
+         覆盖两个看盘点：13:30 前（国内下午盘参考）、21:00 前（国内夜盘参考）。
    v2.8：头部「实时」时间戳改为按「数据日期+时间」比较（腾讯 f[12] / 新浪 f[12] 提供日期）。
          旧版仅比较 HH:MM:SS 字符串，跨午夜后会把昨晚的 22:59:57（如马棕油昨日收盘）
          误判为"最新"，导致早上打开页面头部一直显示「实时 22:59:57」。
@@ -234,6 +237,16 @@ function todayKey(){
 function todayYmd(){
   var d = new Date();
   return d.getFullYear() + '-' + pad2(d.getMonth()+1) + '-' + pad2(d.getDate());
+}
+/* v2.9：马棕油（BMD FCPO）显示窗口 —— 仅在【周一至周五 10:30-23:00（北京）】显示。
+   它 23:00 收盘、次日 10:30 开盘，跨夜大段无波动；早上隔夜档显示的收盘僵值无意义。
+   两个必需的看盘点（13:30 前 / 21:00 前）均落在窗口内。 */
+function fpoVisible(){
+  var d = new Date();
+  var wd = d.getDay();                     /* 0=周日, 6=周六 */
+  if(wd === 0 || wd === 6) return false;   /* 周末休市 */
+  var t = d.getHours()*60 + d.getMinutes();
+  return t >= 630 && t < 1380;             /* 10:30 ≤ t < 23:00 */
 }
 function nowSec(){
   var d = new Date();
@@ -347,6 +360,7 @@ function render(){
   tb.innerHTML = '';
   for(var i=0;i<d.rows.length;i++){
     var r = d.rows[i];
+    if(r.name === '马棕油' && !fpoVisible()) continue;   /* v2.9: 窗口外不显示（收盘僵值无意义） */
     var q = quoteOf(r);                          /* 腾讯实时 或 TradingView 延时 */
     var last = (q && q.last!=null) ? q.last : r.last;
     var chg = r.chg, pct = r.pct;

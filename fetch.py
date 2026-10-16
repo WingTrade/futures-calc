@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.9）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.9.1）
 ======================================================
+v1.9.1 更新（2026-10-16）：
+  - 换月修正的起始时间标注由「昨结」改为「昨结 换月」（提醒更醒目，用户要求）。
+  - 新增「换月修正行过渡期兜底继承」：某行上轮被换月修正（note 含"换月"）后，
+    在下一轮取到新值之前，若遇取不到价且 ref 匹配失败，沿用其修正值（连 ref 一并沿用），
+    不再跌回"缺"（覆盖场景：修正当天的手动 Run、或任何中间轮次）。
+
 v1.9 更新（2026-10-16）：
   - 新增「换月检测」：主连换月时，若参考时点落在换月前（参考价=老合约），
     而行情已切到新合约，页面涨跌幅会失真（例：10-16 美燃油 老合约 4.834
@@ -630,12 +636,15 @@ def main():
         print('续接: 无上一版 data.json（首次运行）')
     prev_by_key = {}
     prev_by_name = {}
+    prev_special = {}   # v1.9.1: 换月修正行（note 含"换月"），供过渡期兜底继承
     for _r in prev_rows:
         if _r.get('close') is None:
             continue
         if _r.get('ref'):
             prev_by_key[(_r.get('name'), _r.get('ref'))] = _r
         prev_by_name.setdefault(_r.get('name'), _r)
+        if '换月' in (_r.get('note') or ''):
+            prev_special.setdefault(_r.get('name'), _r)
 
     # 组装行
     rows = []
@@ -828,6 +837,12 @@ def main():
             p = prev_by_name.get(row['name'])
             if p is not None and not row.get('ref'):
                 row['ref'] = p.get('ref')   # 美股行整体沿用（含参考日期标签）
+        # v1.9.1: 换月修正行的过渡期兜底 —— 本轮取不到价且 ref 匹配失败时，
+        # 沿用其修正值（连 ref 一并沿用，保持「昨结 换月」口径标注），不再跌回"缺"
+        if p is None and row['name'] in prev_special:
+            p = prev_special[row['name']]
+            if p is not None:
+                row['ref'] = p.get('ref')
         if p is None:
             continue
         row['close'] = p['close']
@@ -892,7 +907,7 @@ def main():
         if lo * 0.995 <= close <= hi * 1.005:
             continue                                     # 条件②未命中（在正常区间内）
         row['close'] = ps
-        row['ref'] = '昨结'
+        row['ref'] = '昨结 换月'
         row['note'] = '换月'
         if row['last'] is not None:
             row['chg'] = row['last'] - ps
