@@ -1,12 +1,12 @@
 {
- "generated_at": "2026-10-18 02:54",
+ "generated_at": "2026-10-18 05:53",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
  "ref_desc": "参考(有色01:00/贵金属02:30/其他23:00): 23:00→10-16 23:00  01:00→10-17 01:00  02:30→10-17 02:30",
  "em_ok": false,
  "sina_ok": true,
- "kline_fail": 20,
+ "kline_fail": 23,
  "rows": [
   {
    "name": "WTI原油",
