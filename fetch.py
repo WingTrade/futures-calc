@@ -763,15 +763,19 @@ def main():
     now = now_cn()
     print(f'当前北京时间: {now:%Y-%m-%d %H:%M:%S}')
 
-    # v1.9.2: 10:15 档预轮等待 —— 配套 fetch.yml 的 09:50 / 09:55 预触发轮。
-    # 预轮因调度波动可能提前落地（如 09:5x 就执行），此时 10:15 基准价还没产出；
-    # 等待到 10:16:05 再继续，保证取价时点正确。窗口 09:46:05~10:16:05，只影响预轮。
-    t_1016 = now.replace(hour=10, minute=16, second=5, microsecond=0)
-    if timedelta(0) < (t_1016 - now) <= timedelta(minutes=30):
-        print(f'预轮等待: 本轮于 {now:%H:%M:%S} 提前执行，等待至 10:16:05 再取 10:15 基准价')
-        time.sleep((t_1016 - now).total_seconds())
-        now = now_cn()
-        print(f'等待结束，现在: {now:%Y-%m-%d %H:%M:%S}')
+    # v1.9.2 → v1.16.1: 节点等待泛化到全部档位 —— 配套 fetch.yml 的"提前 30 分钟
+    # 预触发"策略（GitHub 定时排队延迟实测 26~36 分钟，预触发把延迟吃进触发点）。
+    # 预轮若提前落地，此时基准价还没产出；等待到"节点+1 分 05 秒"再继续取价。
+    # 各档目标：10:15→10:16:05 / 11:30→11:31:05 / 15:00→15:01:05 /
+    #           23:00→23:01:05 / 01:00→01:01:05 / 02:30→02:31:05
+    for _hh, _mm in ((10, 16), (11, 31), (15, 1), (23, 1), (1, 1), (2, 31)):
+        _t = now.replace(hour=_hh, minute=_mm, second=5, microsecond=0)
+        if timedelta(0) < (_t - now) <= timedelta(minutes=32):
+            print(f'预轮等待: 本轮于 {now:%H:%M:%S} 提前执行，等待至 {_hh:02d}:{_mm:02d}:05 再取价')
+            time.sleep((_t - now).total_seconds())
+            now = now_cn()
+            print(f'等待结束，现在: {now:%Y-%m-%d %H:%M:%S}')
+            break
 
     # 交易日历
     try:
