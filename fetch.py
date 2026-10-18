@@ -1256,6 +1256,23 @@ def main():
     if roll16_fix:
         print(f'换月修正(锚定法): {roll16_fix} 行')
 
+    # v1.16.2: 换月去重 —— 原油这类同品种分两档（23:00 / 02:30）的品种，
+    # 换月修正后两行都退化为「同一个新合约昨结 + 同一个最新价」，数字完全重复，
+    # 页面上并排显示两条毫无意义（用户要求只留一条）。
+    # 判定严格：同 code + 都 roll='fix' + close/last/chg 全等才去重；
+    # 正常轮次两档参考时点不同、价格不同，绝不会触发。
+    _seen_dup = {}
+    _dedup_rows = []
+    for row in rows:
+        if row.get('roll') == 'fix' and row.get('code'):
+            _k = (row['code'], row.get('close'), row.get('last'), row.get('chg'))
+            if _k in _seen_dup:
+                print(f"换月去重: {row['name']}（{row.get('ref')}）与上一条数值全等，去掉重复行")
+                continue
+            _seen_dup[_k] = True
+        _dedup_rows.append(row)
+    rows = _dedup_rows
+
     # ---------------- v1.9：换月检测（参考价失真自动修正） ----------------
     # 主连换月时，若"参考时点"落在换月前（参考价=老合约价），而行情已切到新合约，
     # 页面涨跌幅会失真（例：2026-10-16 美燃油 老合约 4.834 vs 新合约 4.596，
