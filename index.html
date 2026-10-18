@@ -45,7 +45,7 @@
   }
   tbody tr:last-child td{border-bottom:none;}
   td.name{text-align:left; font-weight:600; color:var(--header-bg); padding-left:9px;}
-  /* 可点品种：点名称直达全屏 K 线（kline.html，新浪原版页面） */
+  /* 可点品种：点名称直达全屏 K 线（k/<代码>.html，新浪原版页面镜像） */
   td.name a.klink{color:inherit; text-decoration:none; border-bottom:1px dashed rgba(30,58,95,.45);}
   td.name a.klink:hover{color:#0B5CAD; border-bottom-color:#0B5CAD;}
   tr:nth-child(even) td{background:var(--row-b);}
@@ -786,22 +786,22 @@ function saveCache(d){
 
 /* ---------- 渲染 ---------- */
 /* v2.14：品种名可点，点开即新浪原版全屏 K 线。
-   做法：kline.html 是同源镜像的新浪行情页（finance.sina.com.cn/futures/quotes/CL.shtml），
+   做法：k/<小写代码>.html 是同源镜像的新浪行情页（finance.sina.com.cn/futures/quotes/<代码>.shtml），
    注入脚本把 hq.sinajs.cn 的请求改走自建中转（浏览器直连会被 403），
    并在图表拉到数据后自动点一次「全屏查看」——打开的观感与在新浪页点全屏完全一致，
    悬停读数、周期切换、指标切换都是原版行为。 */
-/* v2.15：全部外盘品种都可点。kline.html 是 CL 的镜像页（根目录，早期入口）；
-   其余品种在 k/<代码>.html —— 都是同一套注入（hq 走中转 + 自动全屏），
+/* v2.15：全部外盘品种都可点，镜像页统一收在 k/ 目录（k/cl.html、k/gc.html …），
+   都是同一套注入（hq 走中转 + 自动全屏），
    与新浪行情页点「全屏查看」后的观感一致。新浪新增品种时补一行即可。 */
 var KLINE_URL = {
-  'hf_CL':'kline.html',
-  'hf_OIL':'k/OIL.html', 'hf_GC':'k/GC.html', 'hf_SI':'k/SI.html', 'hf_XAG':'k/XAG.html',
-  'hf_AHD':'k/AHD.html', 'hf_ZSD':'k/ZSD.html', 'hf_NID':'k/NID.html', 'hf_SND':'k/SND.html',
-  'hf_HG':'k/HG.html', 'hf_CAD':'k/CAD.html', 'hf_PBD':'k/PBD.html',
-  'hf_HO':'k/HO.html', 'hf_NG':'k/NG.html',
-  'hf_S':'k/S.html', 'hf_SM':'k/SM.html', 'hf_BO':'k/BO.html',
-  'hf_RS':'k/RS.html', 'hf_CT':'k/CT.html',
-  'hf_FCPO':'k/FCPO.html', 'hf_FEF':'k/FEF.html', 'hf_RSS3':'k/RSS3.html'
+  'hf_CL':'k/cl.html',
+  'hf_OIL':'k/oil.html', 'hf_GC':'k/gc.html', 'hf_SI':'k/si.html', 'hf_XAG':'k/xag.html',
+  'hf_AHD':'k/ahd.html', 'hf_ZSD':'k/zsd.html', 'hf_NID':'k/nid.html', 'hf_SND':'k/snd.html',
+  'hf_HG':'k/hg.html', 'hf_CAD':'k/cad.html', 'hf_PBD':'k/pbd.html',
+  'hf_HO':'k/ho.html', 'hf_NG':'k/ng.html',
+  'hf_S':'k/s.html', 'hf_SM':'k/sm.html', 'hf_BO':'k/bo.html',
+  'hf_RS':'k/rs.html', 'hf_CT':'k/ct.html',
+  'hf_FCPO':'k/fcpo.html', 'hf_FEF':'k/fef.html', 'hf_RSS3':'k/rss3.html'
 };
 function nameHtml(nm, r){
   var c = sinaCodeOf(r);
