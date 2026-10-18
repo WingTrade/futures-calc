@@ -207,6 +207,8 @@ var SHORT_NAMES = { '新加坡铁矿石': '新加坡铁矿' };
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
+var UI_VER = '2.16';      /* v2.16.1: 前端版本号，与 fetch.py 写入 data.json 的 ui 字段对齐；
+                             不一致时页面自动重载拿新 HTML（见 loadJson 的版本自检） */
 var CACHE_KEY = 'waiPanPageCacheV1';
 /* data.json 尚未带 code 字段（旧版）时，用品种名兜底匹配腾讯代码 */
 var NAME2CODE = {
@@ -1004,6 +1006,18 @@ async function loadJson(){
     var r = await fetch('data.json?t='+Date.now(), {cache:'no-store'});
     if(!r.ok) throw new Error('HTTP '+r.status);
     var d = await r.json();
+    /* v2.16.1: 前端版本自检 —— 页面常驻打开时，旧 HTML 的 JS 不会自己更新，
+       云端 data.json 带了 ui 版本号；发现线上版本比本页新就自动重载一次，
+       带 ?v= 参数强制拿新 HTML（避免浏览器缓存继续顶着旧 JS）。
+       sessionStorage 记录已尝试的版本，防止缓存层反复回旧导致刷新死循环。 */
+    if(d.ui && d.ui !== UI_VER){
+      var tried = sessionStorage.getItem('ui_reload_v');
+      if(tried !== d.ui){
+        sessionStorage.setItem('ui_reload_v', d.ui);
+        location.href = location.pathname + '?v=' + encodeURIComponent(d.ui);
+        return false;
+      }
+    }
     state.data = d;
     saveCache(d);
     render();
