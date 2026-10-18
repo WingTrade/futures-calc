@@ -68,7 +68,6 @@
   .mk-live{background:#E8F5E9; color:#0B8043; border:1px solid #A5D6A7;}
   .mk-lag{background:#FFF8E1; color:#8D6E00; border:1px solid #FFE082;}
   .mk-src{background:#FBE9E7; color:#C0392B; border:1px solid #F7C1BB;}
-  .mk-roll{background:#E3F2FD; color:#1565C0; border:1px solid #90CAF9;}
   @media (max-width:520px){
     body{padding:4px;}
     td{padding:1px 4px;}
@@ -207,7 +206,7 @@ var SHORT_NAMES = { '新加坡铁矿石': '新加坡铁矿' };
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.16';      /* v2.16.1: 前端版本号，与 fetch.py 写入 data.json 的 ui 字段对齐；
+var UI_VER = '2.17';      /* v2.17: 前端版本号，与 fetch.py 写入 data.json 的 ui 字段对齐；
                              不一致时页面自动重载拿新 HTML（见 loadJson 的版本自检） */
 var CACHE_KEY = 'waiPanPageCacheV1';
 /* data.json 尚未带 code 字段（旧版）时，用品种名兜底匹配腾讯代码 */
@@ -824,15 +823,15 @@ function rowHtml(r){
   /* v2.11: 补档成功不再打标记 —— 值同样源同口径、与云端逐位一致，
      标出来只会让人以为"这个数是临时的"。只有真需要提醒时才标记（旧时刻 / 缓存）。 */
   var mark = r.mark ? '<span class="mk mk-lag" title="'+(r.markTip||'')+'">'+r.mark+'</span>' : '';
-  /* v2.16: 换月小标 —— 云端锚定法判定本行跨换月（参考价已按新合约口径修正），
-     涨跌幅右侧标「换月」，提醒该行数值的基准不是原时点主连价 */
-  var roll = (r.roll==='fix') ? '<span class="mk mk-roll" title="该行跨过换月：参考价已按新主力合约口径修正">换月</span>' : '';
+  /* v2.17（用户要求）：去掉涨跌幅右侧的「换月」小标 —— 太挤占显示。
+     换月提示只保留在「起始时间」列（云端 ref 已置为「换月」二字），
+     看到这两个字就知道该去查 K 线了。 */
   var refCell = '<td class="ref"'+(r.refTip?' title="'+r.refTip+'"':'')+'>'+(r.ref||'—')+mark+'</td>';
   return '<td class="name">'+nameHtml(nm, r)+'</td>'+
     '<td class="'+(r.close==null?'miss':'')+'">'+fmt2(r.close)+'</td>'+
     '<td class="'+(r.last==null?'miss':'')+'">'+fmt2(r.last)+'</td>'+
     '<td class="'+cls(r.chg)+'">'+fmt2(r.chg,true)+'</td>'+
-    '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+roll+flag+src+'</td>'+
+    '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+flag+src+'</td>'+
     refCell;
 }
 function render(){
@@ -880,8 +879,7 @@ function render(){
     var tr = document.createElement('tr');
     tr.innerHTML = rowHtml({name:r.name, close:bq.close, last:last, chg:chg, pct:pct,
                             flag:r.flag, ref:bq.ref, mark:bq.mark, markTip:bq.markTip,
-                            refTip:bq.refTip, src:stag, srcTip:srcTagTip(stag, r, q),
-                            roll:r.roll});
+                            refTip:bq.refTip, src:stag, srcTip:srcTagTip(stag, r, q)});
     tb.appendChild(tr);
   }
   /* 上证指数临时行（仅 10:15-10:30 / 11:30-13:30 出现，见 sseRowHtml） */
