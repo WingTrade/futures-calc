@@ -45,6 +45,9 @@
   }
   tbody tr:last-child td{border-bottom:none;}
   td.name{text-align:left; font-weight:600; color:var(--header-bg); padding-left:9px;}
+  /* 可点品种：点名称直达全屏 K 线（kline.html，新浪原版页面） */
+  td.name a.klink{color:inherit; text-decoration:none; border-bottom:1px dashed rgba(30,58,95,.45);}
+  td.name a.klink:hover{color:#0B5CAD; border-bottom-color:#0B5CAD;}
   tr:nth-child(even) td{background:var(--row-b);}
   tr:nth-child(even) td.name{background:var(--name-b);}
   tr:nth-child(odd) td.name{background:var(--name-a);}
@@ -782,6 +785,18 @@ function saveCache(d){
 }
 
 /* ---------- 渲染 ---------- */
+/* v2.14：品种名可点，点开即新浪原版全屏 K 线。
+   做法：kline.html 是同源镜像的新浪行情页（finance.sina.com.cn/futures/quotes/CL.shtml），
+   注入脚本把 hq.sinajs.cn 的请求改走自建中转（浏览器直连会被 403），
+   并在图表拉到数据后自动点一次「全屏查看」——打开的观感与在新浪页点全屏完全一致，
+   悬停读数、周期切换、指标切换都是原版行为。 */
+var KLINE_URL = { 'hf_CL': 'kline.html' };
+function nameHtml(nm, r){
+  var c = sinaCodeOf(r);
+  var u = c && KLINE_URL[c];
+  if(!u) return nm;
+  return '<a class="klink" href="'+u+'" target="_blank" rel="noopener" title="打开全屏K线（新浪原版）">'+nm+'</a>';
+}
 function rowHtml(r){
   var nm = SHORT_NAMES[r.name] || r.name;
   var flag = '';   /* v2.13: 取消 ※ 小标 ——「起始时间」列已显示真实取价笔，用户要求去掉 */
@@ -790,7 +805,7 @@ function rowHtml(r){
      标出来只会让人以为"这个数是临时的"。只有真需要提醒时才标记（旧时刻 / 缓存）。 */
   var mark = r.mark ? '<span class="mk mk-lag" title="'+(r.markTip||'')+'">'+r.mark+'</span>' : '';
   var refCell = '<td class="ref"'+(r.refTip?' title="'+r.refTip+'"':'')+'>'+(r.ref||'—')+mark+'</td>';
-  return '<td class="name">'+nm+'</td>'+
+  return '<td class="name">'+nameHtml(nm, r)+'</td>'+
     '<td class="'+(r.close==null?'miss':'')+'">'+fmt2(r.close)+'</td>'+
     '<td class="'+(r.last==null?'miss':'')+'">'+fmt2(r.last)+'</td>'+
     '<td class="'+cls(r.chg)+'">'+fmt2(r.chg,true)+'</td>'+
