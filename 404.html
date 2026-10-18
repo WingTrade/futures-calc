@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>页面跳转中…</title>
+<!--
+  GitHub Pages 自定义 404：只做两件事，避免旧链接断掉
+  ① /k/XAG.html 这类大写旧地址 → 跳转到小写 /k/xag.html
+  ② 旧的 /kline.html → /k/cl.html
+  其余路径视为真 404，显示回首页的提示。
+-->
+<style>
+  body{
+    font-family:"Microsoft YaHei","PingFang SC",-apple-system,sans-serif;
+    background:#eef2f7; color:#333; display:flex; align-items:center; justify-content:center;
+    height:100vh; margin:0; text-align:center;
+  }
+  .box{background:#fff; border-radius:8px; padding:28px 34px; box-shadow:0 2px 10px rgba(30,58,95,.08);}
+  h1{font-size:16px; color:#1E3A5F; margin:0 0 10px;}
+  p{font-size:13px; color:#777; margin:6px 0; line-height:1.6;}
+  a{color:#0B5CAD; text-decoration:none;}
+</style>
+</head>
+<body>
+<div class="box">
+  <h1 id="t">页面跳转中…</h1>
+  <p id="d">正在打开对应页面。</p>
+  <p><a href="https://wingtrade.github.io/futures-calc/">← 返回外盘涨跌统计</a></p>
+</div>
+<script>
+(function(){
+  var p = location.pathname;
+  /* ① /k/<代码>.html：大小写不统一时统一跳小写 */
+  var m = /^(.*\/k\/)([A-Za-z0-9]+)\.html$/i.exec(p);
+  if (m) {
+    var target = m[1] + m[2].toLowerCase() + '.html';
+    if (target !== p) { location.replace(target + location.search + location.hash); return; }
+  }
+  /* ② 旧入口 kline.html（已被 k/cl.html 取代） */
+  if (/\/kline\.html$/i.test(p)) {
+    location.replace(p.replace(/\/kline\.html$/i, '/k/cl.html') + location.search + location.hash);
+    return;
+  }
+  /* ③ 真 404 */
+  document.getElementById('t').textContent = '页面不存在';
+  document.getElementById('d').textContent = '这个地址没有对应内容，可能是链接拼写有误。';
+})();
+</script>
+</body>
+</html>
