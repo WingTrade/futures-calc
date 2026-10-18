@@ -17,6 +17,7 @@ on:
     - cron: '32 18 * * *'  # 北京 02:32（凌晨）· 贵金属收盘（02:30 节点）
     - cron: '35 21 * * *'  # 北京 05:35（凌晨）· 夜盘汇总兜底（原 05:50 提前，避开 CME 06:00 分时切换窗口，防参考价被顶掉）
     - cron: '45 23 * * *'  # 北京 07:45 · 美股日线定格（轻量：只更新美股三行；新浪美股日K更新晚于 05:30 判据，此时补最新）
+    - cron: '0 0 * * *'    # 北京 08:00 · 早盘前隔夜修正轮（延迟后约 08:26~08:36 落地，赶在国内 09:00 开盘前把隔夜档修正到位，含换月锚定修正）
   workflow_dispatch:       # 手动触发：随时想看最新数据，Actions 页点 Run workflow，约 2 分钟后刷新网页即可
 
 permissions:
@@ -46,4 +47,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data.json
           git diff --cached --quiet || git commit -m "update data $(date -u +%FT%TZ)"
+          # 相邻轮次（07:45 美股轮 / 08:00 早盘前轮）撞车时先合流再推，避免非快进失败
+          git pull --rebase
           git push
