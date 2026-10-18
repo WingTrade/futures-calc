@@ -359,5 +359,9 @@
    "ref_actual": null,
    "gap_min": null
   }
- ]
+ ],
+ "contracts": {
+  "CL": "CL2611",
+  "OIL": "OIL2611"
+ }
 }

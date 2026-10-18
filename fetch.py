@@ -1,7 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.15）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.16）
 ======================================================
+  - 换月检测换引擎：主力合约锚定法（v1.16，用户方案，替代价格区间判据为主通道）：
+      · 原理：主连 hf_CL 的行情流就是当前主力合约的行情流，所以枚举候选月份合约
+        快照（hf_CL + YYMM，本月起 6 个月窗口——实测美天然气主力跳 NG2701、
+        美原糖跳 RS2703，跨多月换月真实存在，窗口窄了会漏），找与主连
+        【同价且同刻】（快照 date+time 完全相同、价差 <=0.3%）者 = 当前主力合约。
+      · 持久化：每轮把 {sym: 'CL2612'} 写进 data.json 顶层 contracts；
+        下一轮比对，锚变了 = 换月（首轮回无锚只建锚，不动作）。
+      · 修正两级：① 优先"穿越换月"——拉【新合约】自己的当日分时表，按原参考时点
+        重新取价（新合约换月前也在交易，口径无缝连续，「起始时间」列保持原时点）；
+        ② 分时取不到 → 参考价 := 新合约昨结算，起始时间列标「换月」。
+        行字段 roll='fix'，页面涨跌幅右侧显示「换月」小标；跨轮续接时一并继承。
+      · 与旧通道的关系：锚定法覆盖的品种（判得出当前主力）【不再走】v1.9/1.14/1.15
+        的价格区间检测——旧判据依赖"当段分时表=同一合约"，换月点落在时段中段时
+        该假设破裂（2026-10-17 WTI 事故：23:00 行 97.578 与 02:30 行 101.58 同轮
+        相差 3.9%，区间被两个合约共同撑宽，双通道全部漏检）。锚定法判不出的品种
+        才由旧通道兜底。
   - 换月检测补第二通道（v1.15，采纳同行评审）：
       · v1.14 只查【最新价】是否跑出当段分时表区间 —— 覆盖"分时表与快照切合约不同步"的瞬间；
         但真实事故（10-16 美燃油）不是这样：两个源**都已切到新合约**，失真的是【起始价】
@@ -499,6 +515,63 @@ def rollover_suspect_close(bars, close, ps, exclude=False,
             close, lo, hi, gap * 100)
     return None, None, ''
 
+def sina_active_contracts(sina_map, now):
+    """v1.16: 锚定法——枚举候选月份合约快照，找"与主连同价同刻"者 = 当前主力合约。
+
+    原理（物理必然）：主连 hf_XXX 的行情流就是当前主力合约的行情流，
+    所以必然存在某个月份合约 hf_XXXYYMM 与主连【同一秒、同一价】。
+    判据分级：
+      · 强判据：快照时间戳（date+time）完全相同 且 价差 <= 0.3% → 直接认定；
+      · 弱判据：价差 <= 0.2% 的最小者（收盘静止期时间戳各自停在不同时刻时用）。
+    判不出的品种不进结果（调用方跳过，走原有价格区间检测兜底）。
+
+    返回 {sym: {'contract': 'CL2612', 'prev_settle': float|None}}。"""
+    out = {}
+    syms = sorted({c[3:] for c in sina_map if c.startswith('hf_')})
+    for sym in syms:
+        main_q = sina_map.get('hf_' + sym)
+        if not main_q or not main_q.get('last'):
+            continue
+        y, m = now.year, now.month
+        cand_codes = []
+        # 本月起 6 个月，跨年进位。窗口要宽：主力不一定是次月——
+        # 实测美天然气 2026-10-19 主力已是 NG2701（跳过 2611/2612），
+        # 国内外都存在"跨多月换月"，窗口窄了会判不出 = 换月漏检。
+        for k in range(6):
+            mm = (m - 1 + k) % 12 + 1
+            yy = y + (m - 1 + k) // 12
+            cand_codes.append(f'hf_{sym}{yy % 100:02d}{mm:02d}')
+        try:
+            cands = sina_snapshot(cand_codes)
+        except Exception:
+            continue
+        cent = ('hf_' + sym) in SINA_CENT_TO_DOLLAR   # 美铜：候选合约同样是美分，比较前换算
+        best_weak = None
+        found = None
+        for cc in cand_codes:
+            q = cands.get(cc)
+            if not q or not q.get('last'):
+                continue
+            qlast = q['last'] / 100.0 if cent else q['last']
+            mlast = main_q['last'] / 100.0 if cent else main_q['last']
+            gap = abs(qlast - mlast) / mlast if mlast else 1.0
+            if q.get('date') == main_q.get('date') and q.get('time') == main_q.get('time') \
+                    and gap <= 0.003:
+                found = cc                     # 同价同刻 = 铁证
+                break
+            if gap <= 0.002 and best_weak is None:
+                best_weak = cc
+        if found is None:
+            found = best_weak
+        if found:
+            q = cands[found]
+            ps = q.get('prev_settle')
+            if ps is not None and cent:
+                ps /= 100.0
+            out[sym] = {'contract': found[3:], 'prev_settle': ps}
+        time.sleep(0.2)                        # 温和请求
+    return out
+
 def sina_dailyk_highlow_range(symbol, n=2):
     """v1.9: 取最近 n 根日K的 [min(low), max(high)]，供换月检测的区间校验用。
     失败返回 None（调用方跳过检测，不影响主流程）。"""
@@ -751,6 +824,16 @@ def main():
         sina_map, sina_ok = {}, False
     print(f'快照: 东财 {len(em_map)}, 新浪 {len(sina_map)}')
 
+    # v1.16: 主力合约锚定 —— 枚举候选月份合约，找与主连"同价同刻"者。
+    # 结果每轮写入 data.json 顶层 contracts，下一轮比对：变了 = 换月。
+    try:
+        contracts_now = sina_active_contracts(sina_map, now)
+    except Exception as e:
+        print(f'主力锚定失败({type(e).__name__})')
+        contracts_now = {}
+    if contracts_now:
+        print('主力锚定:', {s: i['contract'] for s, i in contracts_now.items()})
+
     # v1.1 新增：新浪"当日分时"（参考价主源）
     #   按 symbol 去重拉取；美铜美分→美元换算；间隔 0.35s 温和请求
     #   （铁矿石有自己的 minline + 日K 兜底逻辑，此处跳过）
@@ -788,14 +871,18 @@ def main():
 
     # v1.8: 读上一版 data.json（Actions 里 = 上一轮提交的版本），供"取不到价时续接"用。
     # 普通品种按 name+ref 精确匹配；铁矿等特判分支会在行组装时提前用到 prev_by_key。
+    # v1.16: 同时读顶层 contracts（上一轮的主力合约锚），供换月判定。
     prev_rows = []
+    prev_contracts = {}
     prev_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data.json')
     try:
         with open(prev_path, encoding='utf-8') as f:
-            prev_rows = (json.load(f) or {}).get('rows') or []
-        print(f'续接: 读到上一版 data.json, {len(prev_rows)} 行')
+            _prev_data = json.load(f) or {}
+        prev_rows = _prev_data.get('rows') or []
+        prev_contracts = _prev_data.get('contracts') or {}
+        print(f'续接: 读到上一版 data.json, {len(prev_rows)} 行, 合约锚 {len(prev_contracts)} 个')
     except Exception:
-        prev_rows = []
+        prev_rows, prev_contracts = [], {}
         print('续接: 无上一版 data.json（首次运行）')
     prev_by_key = {}
     prev_by_name = {}
@@ -815,6 +902,16 @@ def main():
             prev_by_name.setdefault(_nn2, _r)
         if '换月' in (_r.get('note') or ''):
             prev_special.setdefault(_r.get('name'), _r)
+
+    # v1.16: 换月集合 = {sym: (旧合约, 新合约)}，本轮锚 vs 上一轮锚。
+    # 锚定判不出的品种不进集合（走旧价格区间通道兜底）；首轮回无锚可比对，自然为空。
+    rollover_syms = {}
+    for _sym, _info in contracts_now.items():
+        _pc = prev_contracts.get(_sym)
+        if _pc and _pc != _info['contract']:
+            rollover_syms[_sym] = (_pc, _info['contract'])
+    if rollover_syms:
+        print(f'换月判定(锚定法): {rollover_syms}')
 
     # 组装行
     rows = []
@@ -1043,7 +1140,12 @@ def main():
         row['gap_min'] = p.get('gap_min')
         if row['last'] is None:
             row['last'] = p.get('last')
-        if row.get('note') == '缺':
+        if p.get('roll') == 'fix':
+            # v1.16: 换月修正行的继承要连"换月"身份一起继承 ——
+            # 否则下一轮页面小标消失，且 close 仍是修正口径却没了说明
+            row['roll'] = 'fix'
+            row['note'] = '换月'
+        elif row.get('note') == '缺':
             row['note'] = '继'
         if row['close'] is not None and row['last'] is not None and row['close'] > 0:
             row['chg'] = row['last'] - row['close']
@@ -1075,6 +1177,81 @@ def main():
     if rollback_keep:
         print(f'美股防回退: {rollback_keep} 行保留上一版')
 
+    # ---------------- v1.16：换月修正（锚定法，优先于旧价格区间检测） ----------------
+    # 判据：本轮主力合约锚 != 上一轮锚（用户方案：CL0 等价的具体合约变了 = 换月）。
+    # 处理（两步，优先"穿越换月"而不是简单打补丁）：
+    #   ① 拉【新合约】自己的当日分时表，按本行参考时点重新取价
+    #      —— 新合约在换月前也在交易，能拿到"那个时点的新合约真实价"，
+    #      涨跌口径无缝连续，「起始时间」列保持原时点不变；
+    #   ② 分时取不到（远月流动性差等）→ 退化为：参考价 := 新合约昨结算，
+    #      「起始时间」列标「换月」。
+    # 锚定法覆盖的品种不再走 v1.9/v1.14/v1.15 的旧价格区间检测（避免旧判据误伤）。
+    roll16_fix = 0
+    bars_by_contract = {}   # 新合约分时表缓存：contract -> [(dt, price)]
+    for row in rows:
+        code = row.get('code')
+        if not code or not code.startswith('hf_'):
+            continue
+        sym = code[3:]
+        if sym not in rollover_syms:
+            continue
+        old_c, new_c = rollover_syms[sym]
+        ref_dt = None
+        _m = re.match(r'^(\d{2})-(\d{2}) (\d{2}):(\d{2})$', row.get('ref') or '')
+        if _m:
+            try:
+                ref_dt = now.replace(month=int(_m.group(1)), day=int(_m.group(2)),
+                                     hour=int(_m.group(3)), minute=int(_m.group(4)),
+                                     second=0, microsecond=0)
+                if (ref_dt - now).days > 180:
+                    ref_dt = ref_dt.replace(year=ref_dt.year - 1)
+                elif (now - ref_dt).days > 180:
+                    ref_dt = ref_dt.replace(year=ref_dt.year + 1)
+            except ValueError:
+                ref_dt = None
+        new_close, new_hit = None, None
+        if ref_dt is not None:
+            if new_c not in bars_by_contract:
+                try:
+                    bars_by_contract[new_c] = sina_minline_today(new_c)
+                except Exception:
+                    bars_by_contract[new_c] = []
+            _bc = bars_by_contract[new_c]
+            if _bc:
+                try:
+                    new_close, _st, new_hit = ref_price_from_bars(
+                        _bc, ref_dt, max_gap_hours=26, now=now, allow_stale=True)
+                except Exception:
+                    new_close = None
+        if new_close is not None:
+            # ① 穿越成功：参考价 = 新合约在原时点的真实价，ref 文本保持原时点
+            row['close'] = new_close
+            row['note'] = '换月'
+            row['roll'] = 'fix'
+            row['ref_actual'] = f'{new_hit:%m-%d %H:%M}' if new_hit else None
+            row['gap_min'] = (int(round((ref_dt - new_hit).total_seconds() / 60.0))
+                              if new_hit and ref_dt else None)
+        else:
+            # ② 退化：参考价 := 新合约昨结算（优先合约快照的昨结，其次主连快照昨结）
+            ps = (contracts_now.get(sym) or {}).get('prev_settle') \
+                or (sina_map.get(code) or {}).get('prev_settle')
+            if not ps or ps <= 0:
+                print(f'换月修正跳过(无昨结): {row["name"]}')
+                continue
+            row['close'] = ps
+            row['ref'] = '换月'
+            row['note'] = '换月'
+            row['roll'] = 'fix'
+            row['ref_actual'] = None
+            row['gap_min'] = None
+        if row['last'] is not None and row['close'] > 0:
+            row['chg'] = row['last'] - row['close']
+            row['pct'] = row['chg'] / row['close'] * 100
+        roll16_fix += 1
+        print(f"换月修正(锚定法): {row['name']} {old_c}→{new_c}，参考价 -> {row['close']}")
+    if roll16_fix:
+        print(f'换月修正(锚定法): {roll16_fix} 行')
+
     # ---------------- v1.9：换月检测（参考价失真自动修正） ----------------
     # 主连换月时，若"参考时点"落在换月前（参考价=老合约价），而行情已切到新合约，
     # 页面涨跌幅会失真（例：2026-10-16 美燃油 老合约 4.834 vs 新合约 4.596，
@@ -1089,6 +1266,13 @@ def main():
         if not code or row.get('close') is None:
             continue
         sym = code[3:] if code.startswith('hf_') else code
+        # v1.16: 锚定法已覆盖的品种（判得出当前主力合约）不再走旧价格区间检测 ——
+        # 旧判据依赖"分时表=同一合约"假设，换月点在时段中段时会系统性失效；
+        # 锚定法说没换月就是没换月，不让旧通道的结论盖过它。
+        if sym in contracts_now:
+            continue
+        if '换月' in (row.get('note') or ''):
+            continue   # 本轮已被锚定法修正过
         bars_row = ml_by_sym.get(sym) or []
         ps = (sina_map.get(code) or {}).get('prev_settle')
 
@@ -1148,6 +1332,10 @@ def main():
         'em_ok': em_ok,
         'sina_ok': sina_ok,
         'kline_fail': kline_fail,
+        # v1.16: 主力合约锚（{sym: 'CL2612'}）。本轮判不出的品种沿用上一轮锚，
+        # 保证"跨轮比对"不断链；页面顺带展示当前主力合约。
+        'contracts': {**prev_contracts,
+                      **{s: i['contract'] for s, i in contracts_now.items()}},
         'rows': rows,
     }
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data.json')
