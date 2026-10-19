@@ -515,14 +515,35 @@ def rollover_suspect_close(bars, close, ps, exclude=False,
             close, lo, hi, gap * 100)
     return None, None, ''
 
+def _snap_gap_min(a, b):
+    """v1.16.3: 两个快照时刻相差几分钟（处理跨午夜；解析失败返回 None）。"""
+    try:
+        da = datetime.strptime(a['date'] + ' ' + a['time'], '%Y-%m-%d %H:%M:%S')
+        db = datetime.strptime(b['date'] + ' ' + b['time'], '%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return None
+    gap = abs((da - db).total_seconds())
+    return min(gap, 86400 - gap) / 60.0
+
+
 def sina_active_contracts(sina_map, now):
     """v1.16: 锚定法——枚举候选月份合约快照，找"与主连同价同刻"者 = 当前主力合约。
 
     原理（物理必然）：主连 hf_XXX 的行情流就是当前主力合约的行情流，
     所以必然存在某个月份合约 hf_XXXYYMM 与主连【同一秒、同一价】。
     判据分级：
-      · 强判据：快照时间戳（date+time）完全相同 且 价差 <= 0.3% → 直接认定；
-      · 弱判据：价差 <= 0.2% 的最小者（收盘静止期时间戳各自停在不同时刻时用）。
+      · 强判据：快照时间戳相差 <= 3 秒 且 价差 <= 0.3% → 直接认定；
+      · 弱判据：价差 <= 0.2% 的【最小者】（收盘静止期时间戳各自停在不同时刻时用），
+        且与主连时间差 <= 2 分钟。
+    v1.16.3 修误判（2026-10-19 美黄金 GC2612 被判成 GC2610）：
+      · 新增新鲜度闸门——报价时刻落后主连 > 20 分钟的合约是"僵尸报价"
+        （GC2610 停在 19:14、主连已 20:24，价差 0.25% 恰好落在弱判据区间），
+        价格再接近也不得当主力；
+      · 弱判据由"第一个命中者"改为"价差最小者"——原实现先到先得，
+        GC2610 排在候选第一位，一旦命中 0.2% 就会抢占锚，后面更接近的
+        GC2612 不再替换；
+      · 强判据由"秒级完全相同"放宽到 <= 3 秒——新浪各合约快照常差 1 秒，
+        原判据在跨秒瞬间失效，正是这次误判的入口。
     判不出的品种不进结果（调用方跳过，走原有价格区间检测兜底）。
 
     返回 {sym: {'contract': 'CL2612', 'prev_settle': float|None}}。"""
@@ -546,7 +567,7 @@ def sina_active_contracts(sina_map, now):
         except Exception:
             continue
         cent = ('hf_' + sym) in SINA_CENT_TO_DOLLAR   # 美铜：候选合约同样是美分，比较前换算
-        best_weak = None
+        best_weak = None                 # (gap, code) —— 取价差最小者，而非第一个命中者
         found = None
         for cc in cand_codes:
             q = cands.get(cc)
@@ -555,14 +576,18 @@ def sina_active_contracts(sina_map, now):
             qlast = q['last'] / 100.0 if cent else q['last']
             mlast = main_q['last'] / 100.0 if cent else main_q['last']
             gap = abs(qlast - mlast) / mlast if mlast else 1.0
-            if q.get('date') == main_q.get('date') and q.get('time') == main_q.get('time') \
-                    and gap <= 0.003:
-                found = cc                     # 同价同刻 = 铁证
+            lag = _snap_gap_min(q, main_q)
+            if lag is not None and lag > 20:
+                continue                   # 僵尸报价：与主连脱节太久，不参与锚定
+            if q.get('date') == main_q.get('date') and gap <= 0.003 \
+                    and (lag is None or lag * 60 <= 3):
+                found = cc                     # 同价且同刻（容 3 秒）= 铁证
                 break
-            if gap <= 0.002 and best_weak is None:
-                best_weak = cc
-        if found is None:
-            found = best_weak
+            if gap <= 0.002 and (lag is None or lag <= 2) \
+                    and (best_weak is None or gap < best_weak[0]):
+                best_weak = (gap, cc)
+        if found is None and best_weak:
+            found = best_weak[1]
         if found:
             q = cands[found]
             ps = q.get('prev_settle')
