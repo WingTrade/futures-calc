@@ -4,7 +4,7 @@
  "title": "对比10:15涨跌统计",
  "mode_desc": "隔夜",
  "ref_desc": "参考: 今日 10:15",
- "ui": "2.20",
+ "ui": "2.21",
  "em_ok": false,
  "sina_ok": true,
  "kline_fail": 16,

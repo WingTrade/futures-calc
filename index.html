@@ -34,17 +34,15 @@
     width:fit-content; max-width:100%; margin:0 auto; background:#fff;
     border-radius:0 0 7px 7px; overflow:hidden;
   }
-  /* v2.20: 双列布局（电脑浏览器 ≥1024px）—— 左列商品期货，右列股指/美股/A50。
-     flex 顶对齐；窄屏自动回落单列（.blocks 不启用 flex）。 */
+  /* v2.21: 双列 = 两个各自独立的单列块并排（同最初单列的观感）——
+     每块自带完整圆角和边框、彼此分离互不粘连，右块不加任何组标题小字。
+     窄屏（<1024px）自动回落单列，原样式不动。 */
   .blocks{width:fit-content; max-width:100%; margin:0 auto;}
   @media (min-width:1024px){
-    .blocks{display:flex; align-items:flex-start; justify-content:center; gap:14px;}
-    .blocks .block{margin:0;}
-    .block-idx .idx-title{
-      font-size:11px; font-weight:700; color:var(--header-bg);
-      background:var(--name-a); padding:4px 9px 2px; text-align:left;
-      border-bottom:1px solid var(--grid);
-    }
+    .head{border-radius:7px; margin-bottom:10px;}          /* 页面标题栏独立成卡，不再与表格粘连 */
+    .blocks{display:flex; align-items:flex-start; justify-content:center; gap:20px;}
+    .blocks .block{margin:0; border-radius:7px; border:1px solid var(--grid);}
+    .foot{border-radius:7px; margin-top:10px;}             /* 脚注同独立成卡 */
   }
   table{border-collapse:collapse; font-size:12px;}
   thead th{
@@ -144,8 +142,7 @@
       <tbody id="tbody"></tbody>
     </table>
   </div>
-  <div class="block block-idx" id="blockIdx" style="display:none;">
-    <div class="idx-title">股指 · 美股三大指数 / A50</div>
+  <div class="block" id="blockIdx" style="display:none;">
     <table>
       <thead>
         <tr>
@@ -235,7 +232,7 @@ var IDX_NAMES = { '标准普尔':1, '道琼工业':1, '纳斯达克':1, '富时A
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.20';      /* v2.20: 双列修复（tr 包裹）+ 富时A50；与 fetch.py 写入 data.json 的 ui 字段对齐；
+var UI_VER = '2.21';      /* v2.21: 双列改两个独立单列块（去组标题、独立卡片）；与 fetch.py 写入 data.json 的 ui 字段对齐；
                              不一致时页面自动重载拿新 HTML（见 loadJson 的版本自检） */
 var CACHE_KEY = 'waiPanPageCacheV1';
 /* data.json 尚未带 code 字段（旧版）时，用品种名兜底匹配腾讯代码 */
