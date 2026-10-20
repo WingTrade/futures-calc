@@ -2,6 +2,19 @@
 """
 外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.16）
 ======================================================
+  - 美股三行「同批对齐」（v2.18，2026-10-20 纳指滞留事故）：
+      · 事故：07:45 --us-only 轮与 08:00 完整轮落地时，新浪 .IXIC 的 10-19 日线尚未落库，
+        而 .INX / .DJI 已落库 → 表里标普/道指是 10-19 口径，纳指停在 10-16，
+        并按 10-15→10-16 两根算出 -2.15%（实际 10-19 是 +1.11%）。
+      · 成因：us_index_daily_bars 是单源单次请求，无重试、无备源；既有「防回退」只在
+        本轮比上一版更旧时触发，"两新一旧"的同批不同步它管不到。
+      · 修复：① 日线取数改多源 —— 新浪 3 次重试（4s / 8s 退避）+ 腾讯美股日K兜底 2 次；
+              ② 新增 align_us_index_rows()：三行抓完比对日期，落后行按"本批最新日期"
+                 定向重抓（want_last）；仍不齐则三行统一退到共同最新日
+                 —— 宁可旧一天，也不让同一张表混两种口径（该行 note='滞后'）；
+              ③ 主流程与 --us-only 两条路径都接入，对齐放在「防回退」之后（防止被拉回去）。
+      · 腾讯备源实测：.INX / .DJI / .IXIC 收盘与新浪逐位一致
+        （10-19：7690.73 / 51966.03 / 26430.89）。
   - 换月检测换引擎：主力合约锚定法（v1.16，用户方案，替代价格区间判据为主通道）：
       · 原理：主连 hf_CL 的行情流就是当前主力合约的行情流，所以枚举候选月份合约
         快照（hf_CL + YYMM，本月起 6 个月窗口——实测美天然气主力跳 NG2701、
@@ -240,11 +253,18 @@ GROUPS = ['M23', 'M01', 'M0230']
 INDEX_SECIDS = {'100.SPX', '100.DJIA', '100.NDX'}
 # v1.2: 美股指数 → 新浪美股日K symbol（展示"最近一根已收盘日线"的开盘→收盘）
 US_INDEX_MAP = {'100.SPX': '.INX', '100.DJIA': '.DJI', '100.NDX': '.IXIC'}
+# v2.18: 美股三指数的名称集合 / 名称反查 secid / 腾讯备源符号
+US_INDEX_NAMES = {'标准普尔', '道琼工业', '纳斯达克'}
+US_INDEX_SECID_BY_NAME = {name: sid for name, group, sid, sina_code in VARIETIES
+                          if sid in US_INDEX_MAP}
+TX_SYMBOL_BY_SINA = {'.INX': 'usINX', '.DJI': 'usDJI', '.IXIC': 'usIXIC'}
 
 # ---------------- HTTP ----------------
 SINA_HEADERS = {'Referer': 'https://finance.sina.com.cn',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 EM_HEADERS = {'Referer': 'https://quote.eastmoney.com',
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+TX_HEADERS = {'Referer': 'https://gu.qq.com/',
               'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
 
 def http_get(url, headers, enc='utf-8', timeout=15):
@@ -623,12 +643,19 @@ def sina_dailyk_highlow_range(symbol, n=2):
         return None
     return min(lows), max(highs)
 
-def us_index_daily_bars(symbol, now, n=2):
-    """v1.3: 取最近 n 根【已收盘】美股指数日线 → [(日期str, 收盘价), ...]（时间升序，新的在后）。
-    已收盘判据：日线日期(美东)的次日北京 05:30 之后（覆盖夏/冬令时收盘时间差）。"""
+def _us_bar_closed(dstr, now):
+    """v2.18: 该日线是否已收盘 —— 日线日期(美东)的次日北京 05:30 之后（覆盖夏/冬令时收盘差）"""
+    try:
+        d = datetime.strptime(dstr, '%Y-%m-%d')
+    except (ValueError, TypeError):
+        return False
+    return now >= d + timedelta(days=1, hours=5, minutes=30)
+
+def _us_series_from_sina(symbol, now, limit):
+    """v2.18: 新浪美股日K（主源）。带时间戳参数破缓存，返回已收盘日线 [(date, close)] 升序。"""
     u = ('https://stock2.finance.sina.com.cn/usstock/api/jsonp.php/var%20d=/'
-         f'US_MinKService.getDailyK?symbol={symbol}')
-    txt = http_get(u, SINA_HEADERS)
+         f'US_MinKService.getDailyK?symbol={symbol}&_={int(time.time() * 1000)}')
+    txt = http_get(u, SINA_HEADERS, timeout=12)
     m = re.search(r'\((\[.*\])\)', txt, re.S)
     if not m:
         return []
@@ -639,18 +666,88 @@ def us_index_daily_bars(symbol, now, n=2):
     if not isinstance(arr, list):
         return []
     out = []
-    for k in reversed(arr):
+    for k in arr:
         try:
-            d = datetime.strptime(k['d'], '%Y-%m-%d')
-            c = float(k['c'])
-        except (ValueError, KeyError, TypeError):
+            d, c = k['d'], float(k['c'])
+        except (KeyError, ValueError, TypeError):
             continue
-        if now >= d + timedelta(days=1, hours=5, minutes=30):
-            out.append((k['d'], c))
-            if len(out) >= n:
-                break
-    out.reverse()
-    return out
+        if _us_bar_closed(d, now):
+            out.append((d, c))
+    out.sort()
+    return out[-limit:]
+
+def _us_series_from_tx(symbol, now, limit):
+    """v2.18: 腾讯美股日K（备源）。实测三指数收盘与新浪逐位一致。
+    数组格式：[日期, 开, 收, 高, 低, 量, ...]（第 3 个字段是收盘）。"""
+    u = ('https://web.ifzq.gtimg.cn/appstock/app/usfqkline/get'
+         f'?_var=kline_dayqfq&param={symbol},day,,,{max(limit, 12)},qfq'
+         f'&_={int(time.time() * 1000)}')
+    txt = http_get(u, TX_HEADERS, timeout=8)
+    try:
+        j = json.loads(txt)
+    except Exception:
+        m = re.search(r'=\s*(\{.*\})', txt, re.S)
+        if not m:
+            return []
+        try:
+            j = json.loads(m.group(1))
+        except Exception:
+            return []
+    node = (j.get('data') or {}).get(symbol) or {}
+    arr = node.get('day') or node.get('qfqday') or []
+    out = []
+    for b in arr:
+        try:
+            d, c = b[0], float(b[2])
+        except (IndexError, ValueError, TypeError):
+            continue
+        if _us_bar_closed(d, now):
+            out.append((d, c))
+    out.sort()
+    return out[-limit:]
+
+def us_daily_series(symbol, now, limit=8, want_last=None, quiet=False):
+    """v2.18: 单个美股指数已收盘日线（升序）。
+    主源新浪重试 3 次（4s / 8s 退避），仍拿不到期望日期就切腾讯重试 2 次。
+    want_last='YYYY-MM-DD'：期望的最新日线日期；不传则拿到就返回（旧行为）。"""
+    best = []
+    for i in range(3):
+        try:
+            s = _us_series_from_sina(symbol, now, limit)
+        except Exception as e:
+            s = []
+            if not quiet:
+                print(f'  新浪日K({symbol})第{i + 1}次失败: {type(e).__name__}')
+        if s and (not best or s[-1][0] >= best[-1][0]):
+            best = s
+        if s and (not want_last or s[-1][0] >= want_last):
+            return s
+        if i < 2:
+            time.sleep(4 + 4 * i)
+    for i in range(2):
+        try:
+            t = _us_series_from_tx(TX_SYMBOL_BY_SINA.get(symbol, symbol), now, limit)
+        except Exception as e:
+            t = []
+            if not quiet:
+                print(f'  腾讯日K({symbol})第{i + 1}次失败: {type(e).__name__}')
+        if t and (not best or t[-1][0] >= best[-1][0]):
+            best = t
+        if t and (not want_last or t[-1][0] >= want_last):
+            if not quiet:
+                print(f'  腾讯日K({symbol})接管 -> {t[-1][0]}')
+            return t
+        if i < 1:
+            time.sleep(3)
+    if want_last and not quiet:
+        print(f'  日线未达期望 {want_last}（{symbol} 手上最新 {best[-1][0] if best else "无"}）')
+    return best
+
+def us_index_daily_bars(symbol, now, n=2, want_last=None):
+    """v2.18: 取最近 n 根【已收盘】美股指数日线 → [(日期str, 收盘价), ...]（升序，新的在后）。
+    多源：新浪为主 + 腾讯兜底；want_last 让调用方指定"至少要拿到哪一天"。"""
+    s = us_daily_series(symbol, now, limit=max(n + 6, 8), want_last=want_last)
+    return s[-n:] if len(s) >= n else []
 
 def us_ref_date(ref, today):
     """v1.9: 解析美股行 ref（如 '10-15美'）为 date，按"最近原则"归属年份（跨年安全）。
@@ -666,6 +763,87 @@ def us_ref_date(ref, today):
         return d
     except ValueError:
         return None
+
+def align_us_index_rows(rows, now, quiet=False):
+    """v2.18: 美股三行「同批对齐」—— 解决"标普/道指已到 10-19、纳指还停在 10-16"。
+    事故（2026-10-20 早盘）：07:45 --us-only 轮与 08:00 完整轮跑的时候，新浪 .IXIC
+    的 10-19 日线尚未落库（.INX/.DJI 已落库），于是纳指按 10-15→10-16 两根算出 -2.15%
+    （实际 10-19 是 +1.11%），表里混了两种口径。既有的「防回退」只在比上一版更旧时
+    触发，同批不同步它管不到。
+    处理：① 落后行定向重抓（want_last=本批最新日期，新浪重试 + 腾讯兜底）；
+         ② 仍不齐 → 三行统一退到共同最新日（宁可旧一天，也不让同一张表混两种口径）。
+    返回：被修正的行数。"""
+    idx = [(i, r) for i, r in enumerate(rows) if r.get('name') in US_INDEX_NAMES]
+    if len(idx) < 2:
+        return 0
+    dmap = {i: us_ref_date(r.get('ref'), now.date()) for i, r in idx}
+    known = [d for d in dmap.values() if d]
+    if not known:
+        return 0
+    max_d = max(known)
+    if len(set(known)) == 1:
+        return 0
+    if not quiet:
+        _ds = ', '.join(sorted(d.strftime('%m-%d') for d in known))
+        print(f'美股对齐: 本轮日期不齐 [{_ds}]，以 {max_d:%m-%d} 为目标补齐')
+    fixed = 0
+    for i, r in idx:
+        d = dmap[i]
+        if d and d >= max_d:
+            continue
+        secid = US_INDEX_SECID_BY_NAME.get(r['name'])
+        if not secid:
+            continue
+        try:
+            bars = us_index_daily_bars(US_INDEX_MAP[secid], now, 2,
+                                       want_last=max_d.strftime('%Y-%m-%d'))
+        except Exception as e:
+            bars = []
+            if not quiet:
+                print(f"  对齐取数失败({r['name']}): {type(e).__name__}")
+        if len(bars) < 2:
+            continue
+        (d_prev, c_prev), (d_last, c_last) = bars
+        nd = us_ref_date(f'{d_last[5:]}美', now.date())
+        if nd and nd >= max_d:
+            r['close'], r['last'], r['ref'] = c_prev, c_last, f'{d_last[5:]}美'
+            r['chg'] = c_last - c_prev
+            r['pct'] = r['chg'] / c_prev * 100 if c_prev else None
+            r['flag'], r['note'] = False, ''
+            dmap[i] = nd
+            fixed += 1
+            if not quiet:
+                print(f"美股对齐: {r['name']} 补齐 -> {r['ref']}（{c_prev} → {c_last}）")
+    # ② 仍有落后行（两个源都没这一根）→ 整组退到共同最新日，保证表内口径一致
+    known2 = [d for d in dmap.values() if d]
+    if len(set(known2)) > 1:
+        common = min(known2)
+        if not quiet:
+            _ds2 = ', '.join(sorted(d.strftime('%m-%d') for d in known2))
+            print(f'美股对齐: 仍不齐 [{_ds2}]，统一退到 {common:%m-%d}')
+        for i, r in idx:
+            if dmap.get(i) == common:
+                continue
+            secid = US_INDEX_SECID_BY_NAME.get(r['name'])
+            if not secid:
+                continue
+            try:
+                series = us_daily_series(US_INDEX_MAP[secid], now, limit=10, quiet=True)
+            except Exception:
+                series = []
+            part = [x for x in series if x[0] <= common.strftime('%Y-%m-%d')][-2:]
+            if len(part) < 2:
+                continue
+            (d_prev, c_prev), (d_last, c_last) = part
+            r['close'], r['last'], r['ref'] = c_prev, c_last, f'{d_last[5:]}美'
+            r['chg'] = c_last - c_prev
+            r['pct'] = r['chg'] / c_prev * 100 if c_prev else None
+            r['note'] = '滞后'
+            dmap[i] = us_ref_date(r['ref'], now.date())
+            fixed += 1
+            if not quiet:
+                print(f"美股对齐: {r['name']} 退到 {r['ref']}（标「滞后」）")
+    return fixed
 
 def fef_ref_from_dailyk(ref_dt):
     dk = sina_fef_dailyk()
@@ -1144,7 +1322,7 @@ def main():
     # close 会取空 —— 此时从上一版 data.json 继承同一参考时点（name+ref 完全一致）的旧值，
     # 避免把上一轮已取到的好数据覆盖成空。
     # 美股三指数：接口临时失败（不足 2 根日线）时按名称整体沿用上一版，避免行被清空。
-    us_index_names = {'标准普尔', '道琼工业', '纳斯达克'}
+    us_index_names = US_INDEX_NAMES   # v2.18: 提升为模块级常量
     inherit_n = 0
     for row in rows:
         if row['close'] is not None:
@@ -1205,6 +1383,10 @@ def main():
             print(f"防回退: {row['name']} 本轮源数据({cur_d})落后于上一版({p.get('ref')})，保留上一版")
     if rollback_keep:
         print(f'美股防回退: {rollback_keep} 行保留上一版')
+
+    # ---------------- v2.18：美股三行同批对齐 ----------------
+    # 放在防回退之后：对齐可能有意把某行退到共同日期，不能再被防回退拉回去。
+    align_us_index_rows(rows, now)
 
     # ---------------- v1.16：换月修正（锚定法，优先于旧价格区间检测） ----------------
     # 判据：本轮主力合约锚 != 上一轮锚（用户方案：CL0 等价的具体合约变了 = 换月）。
@@ -1453,6 +1635,9 @@ def main_us_only():
             print(f"{row['name']}: -> {new_ref} 收盘={c_prev} 最新={c_last}")
         else:
             print(f"{row['name']}: 无变化（{new_ref}）")
+    # v2.18: 同批对齐 —— 某一指数日线慢一拍时定向补齐（新浪重试 + 腾讯兜底），
+    # 补齐后三行日期一致，避免表里混两种口径
+    changed += align_us_index_rows(data.get('rows', []), now)
     if changed:
         with open(out, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
