@@ -34,6 +34,18 @@
     width:fit-content; max-width:100%; margin:0 auto; background:#fff;
     border-radius:0 0 7px 7px; overflow:hidden;
   }
+  /* v2.20: 双列布局（电脑浏览器 ≥1024px）—— 左列商品期货，右列股指/美股/A50。
+     flex 顶对齐；窄屏自动回落单列（.blocks 不启用 flex）。 */
+  .blocks{width:fit-content; max-width:100%; margin:0 auto;}
+  @media (min-width:1024px){
+    .blocks{display:flex; align-items:flex-start; justify-content:center; gap:14px;}
+    .blocks .block{margin:0;}
+    .block-idx .idx-title{
+      font-size:11px; font-weight:700; color:var(--header-bg);
+      background:var(--name-a); padding:4px 9px 2px; text-align:left;
+      border-bottom:1px solid var(--grid);
+    }
+  }
   table{border-collapse:collapse; font-size:12px;}
   thead th{
     background:var(--header-bg); color:#fff; font-weight:600; padding:3px 6px;
@@ -108,7 +120,7 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+  <div class="wrap">
   <div class="head">
     <h1 id="title">外盘涨跌统计</h1>
     <div class="meta">
@@ -119,7 +131,8 @@
       <span class="lamp"><span class="dot" id="dotSina"></span><span id="lblSina">新浪</span></span>
     </div>
   </div>
-  <div class="block">
+  <div id="blocks" class="blocks">
+  <div class="block" id="blockMain">
     <table>
       <thead>
         <tr>
@@ -130,6 +143,20 @@
       </thead>
       <tbody id="tbody"></tbody>
     </table>
+  </div>
+  <div class="block block-idx" id="blockIdx" style="display:none;">
+    <div class="idx-title">股指 · 美股三大指数 / A50</div>
+    <table>
+      <thead>
+        <tr>
+          <th style="text-align:left; padding-left:9px;">品种名称</th>
+          <th>起始价</th><th>最新价</th><th>对比涨跌</th><th>涨跌幅</th>
+          <th class="ref">起始时间</th>
+        </tr>
+      </thead>
+      <tbody id="tbodyIdx"></tbody>
+    </table>
+  </div>
   </div>
   <div class="foot">
     <div id="refDesc"></div>
@@ -201,12 +228,14 @@ function cls(v){
   return v>0?'up':'down';
 }
 var SHORT_NAMES = { '新加坡铁矿石': '新加坡铁矿' };
+/* v2.20: 股指列成员 —— 双列模式（电脑 ≥1024px）下放右列；单列（手机/窄窗）保持原顺序穿插 */
+var IDX_NAMES = { '标准普尔':1, '道琼工业':1, '纳斯达克':1, '富时A50':1 };
 
 /* ---------- 实时通道（腾讯行情）配置 ---------- */
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.17';      /* v2.17: 前端版本号，与 fetch.py 写入 data.json 的 ui 字段对齐；
+var UI_VER = '2.19';      /* v2.17: 前端版本号，与 fetch.py 写入 data.json 的 ui 字段对齐；
                              不一致时页面自动重载拿新 HTML（见 loadJson 的版本自检） */
 var CACHE_KEY = 'waiPanPageCacheV1';
 /* data.json 尚未带 code 字段（旧版）时，用品种名兜底匹配腾讯代码 */
@@ -219,7 +248,7 @@ var NAME2CODE = {
   '美燃油':'hf_HO','美天然气':'hf_NG',
   '美大豆':'hf_S','美豆粕':'hf_SM','美豆油':'hf_BO',
   '美原糖':'hf_RS','美棉花':'hf_CT','马棕油':'hf_FCPO',
-  '新加坡铁矿石':'hf_FEF','日橡胶':'hf_RSS3'
+  '新加坡铁矿石':'hf_FEF','日橡胶':'hf_RSS3','富时A50':'hf_CHA50CFD'
 };
 /* 腾讯代码例外表：默认与新浪 hf_ 代码一致，个别品种不同。
    v2.11：不再使用腾讯 fuHO —— 它是延时行情（约 10-15 分钟），
@@ -238,7 +267,7 @@ var SINA_PROXIES = [
 var SINA_TRY_TIMEOUT = 4000;   /* 单个中转通道的超时（毫秒）；超时即切下一通道 */
 var SINA_MS = 15000;      /* 准实时刷新间隔（毫秒），与腾讯通道同节奏 */
 /* 走新浪通道升级为准实时的 6 个品种；其余品种腾讯直连已是实时，不必绕行 */
-var SINA_SYMS = { 'hf_RS':1, 'hf_CT':1, 'hf_FCPO':1, 'hf_FEF':1, 'hf_RSS3':1, 'hf_HO':1 };
+var SINA_SYMS = { 'hf_RS':1, 'hf_CT':1, 'hf_FCPO':1, 'hf_FEF':1, 'hf_RSS3':1, 'hf_HO':1, 'hf_CHA50CFD':1 };
 
 /* ---------- 全球源（TradingView，延时行情备份）---------- */
 /* 4 个品种（原糖/棉花/马棕油/日橡胶）的延时兜底源：正常时被新浪准实时通道覆盖，仅在新浪通道异常时显示。
@@ -281,6 +310,16 @@ function fpoVisible(){
   if(wd === 0 || wd === 6) return false;   /* 周末休市 */
   var t = d.getHours()*60 + d.getMinutes();
   return t >= 630 && t < 1380;             /* 10:30 ≤ t < 23:00 */
+}
+/* v2.19：富时A50 双窗口 —— 与云端 fetch.py a50_window 同规则：
+   交易日（周一至五）05:20-09:30（A股开盘前，对比前一交易日 15:00）
+   及 11:30-13:00（A股午休，对比今日 11:30）；其余时间不显示。 */
+function a50Visible(){
+  var d = new Date();
+  var wd = d.getDay();
+  if(wd === 0 || wd === 6) return false;
+  var t = d.getHours()*60 + d.getMinutes();
+  return (t >= 320 && t < 570) || (t >= 690 && t < 780);   /* 05:20-09:30 / 11:30-13:00 */
 }
 function nowSec(){
   var d = new Date();
@@ -460,8 +499,10 @@ async function probeRun(mode, node, date, key){
   for(var i=0;i<rows.length;i++){
     var sc = sinaCodeOf(rows[i]);
     /* v2.12: 美原糖不参与补档 —— 它的基准是"国内糖最近一次收盘时刻（23:00）"的价，
-       与当前档位（10:15/11:30/15:00）无关，云端那份本来就是对的。 */
-    if(sc && rows[i].name !== '美原糖') cand.push({ name:rows[i].name, code:sc });
+       与当前档位（10:15/11:30/15:00）无关，云端那份本来就是对的。
+       v2.19: 富时A50 同理 —— 它走独立双窗口（09:30 前对比昨日 15:00 / 11:30-13:00
+       对比今日 11:30），与商品档位无关，云端口径为准。 */
+    if(sc && rows[i].name !== '美原糖' && rows[i].name !== '富时A50') cand.push({ name:rows[i].name, code:sc });
   }
   for(var j=0;j<cand.length;j++){
     var c = cand[j];
@@ -546,8 +587,9 @@ function baseQuoteOf(r){
   }
   if(refLiveActive()){
     var v = refLive.rows[r.name];
-    /* v2.12: 美原糖不参与补档（它的基准跟着国内糖的收盘时刻走，与档位无关）→ 用云端值 */
-    if(v == null && r.name === '美原糖'){
+    /* v2.12: 美原糖不参与补档（它的基准跟着国内糖的收盘时刻走，与档位无关）→ 用云端值
+       v2.19: 富时A50 同理 —— 双窗口口径与档位无关，永远用云端值 */
+    if(v == null && (r.name === '美原糖' || r.name === '富时A50')){
       return { close: r.close, ref: r.ref_actual || r.ref, mark: '', markTip: '', refTip: '' };
     }
     var a = refLive.actual[r.name];
@@ -808,7 +850,8 @@ var KLINE_URL = {
   'hf_HO':'k/ho.html', 'hf_NG':'k/ng.html',
   'hf_S':'k/s.html', 'hf_SM':'k/sm.html', 'hf_BO':'k/bo.html',
   'hf_RS':'k/rs.html', 'hf_CT':'k/ct.html',
-  'hf_FCPO':'k/fcpo.html', 'hf_FEF':'k/fef.html', 'hf_RSS3':'k/rss3.html'
+  'hf_FCPO':'k/fcpo.html', 'hf_FEF':'k/fef.html', 'hf_RSS3':'k/rss3.html',
+  'hf_CHA50CFD':'k/cha50cfd.html'
 };
 function nameHtml(nm, r){
   var c = sinaCodeOf(r);
@@ -860,9 +903,15 @@ function render(){
   document.getElementById('refDesc').textContent = (d.ref_desc || '') + refLiveNote(d) + mlNote();
   var tb = document.getElementById('tbody');
   tb.innerHTML = '';
+  var idxRows = [];        /* v2.20: 股指列（标准普尔/道琼/纳指/富时A50/上证临时行），双列时放右边 */
+  var rowsHtml = [];       /* v2.20: 商品行的 html 片段（单列模式直接用，双列模式放左边） */
   for(var i=0;i<d.rows.length;i++){
     var r = d.rows[i];
     if(r.name === '马棕油' && !fpoVisible()) continue;   /* v2.9: 窗口外不显示（收盘僵值无意义） */
+    /* v2.19: 富时A50 双窗口 —— 云端已在窗口外不产出该行；这里再挡一道
+       （页面常开、data.json 还是上一窗口的旧值时，不显示过期口径的行）。
+       窗口判定与云端 a50_window 同规则：交易日 05:20-09:30 / 11:30-13:00。 */
+    if(r.name === '富时A50' && !a50Visible()) continue;
     var q = quoteOf(r);                          /* 腾讯实时 或 TradingView 延时 */
     var last = (q && q.last!=null) ? q.last : r.last;
     /* v2.10: 基准价 = 云端值（默认）或本页即时现算值（云端档位落后时） */
@@ -876,18 +925,31 @@ function render(){
     /* v2.11: 只有"本该有实时价"的行才标「缓存」；
        美股三行是收盘口径（早上 9 点前看时早已收盘，不存在时效问题），不标任何小标 */
     if(!stag && !q && r.last != null && sinaCodeOf(r)) stag = '缓存';
-    var tr = document.createElement('tr');
-    tr.innerHTML = rowHtml({name:r.name, close:bq.close, last:last, chg:chg, pct:pct,
-                            flag:r.flag, ref:bq.ref, mark:bq.mark, markTip:bq.markTip,
-                            refTip:bq.refTip, src:stag, srcTip:srcTagTip(stag, r, q)});
-    tb.appendChild(tr);
+    var html = rowHtml({name:r.name, close:bq.close, last:last, chg:chg, pct:pct,
+                        flag:r.flag, ref:bq.ref, mark:bq.mark, markTip:bq.markTip,
+                        refTip:bq.refTip, src:stag, srcTip:srcTagTip(stag, r, q)});
+    if(IDX_NAMES[r.name]){ idxRows.push(html); continue; }   /* v2.20: 股指行进右列 */
+    rowsHtml.push(html);
   }
   /* 上证指数临时行（仅 10:15-10:30 / 11:30-13:30 出现，见 sseRowHtml） */
   var sseHtml = sseRowHtml();
-  if(sseHtml){
-    var trSse = document.createElement('tr');
-    trSse.innerHTML = sseHtml;
-    tb.appendChild(trSse);
+  if(sseHtml){ idxRows.push(sseHtml); }              /* v2.20: 上证属股指参考，归右列 */
+  var wide = window.matchMedia && window.matchMedia('(min-width:1024px)').matches;
+  if(wide && idxRows.length){
+    /* v2.20 双列（电脑浏览器 ≥1024px）：左列商品期货，右列股票股指相关。
+       两个 tbody 并排进同一个 table 结构不成立 —— 用 flex 双 .block，
+       左列行数多，右列顶部对齐；两列各自带表头。 */
+    var sideTb = document.getElementById('tbodyIdx');
+    var wrapIdx = document.getElementById('blockIdx');
+    if(sideTb && wrapIdx){
+      sideTb.innerHTML = idxRows.join('');
+      wrapIdx.style.display = '';
+    }
+    tb.innerHTML = rowsHtml.join('');
+  }else{
+    var wrapIdx2 = document.getElementById('blockIdx');
+    if(wrapIdx2) wrapIdx2.style.display = 'none';
+    tb.innerHTML = rowsHtml.concat(idxRows).join('');
   }
 }
 
@@ -1228,6 +1290,13 @@ async function boot(){
 }
 boot();
 jsonTimer = setInterval(loadJson, JSON_MS);   /* 每 60 秒检查一遍起始价是否更新 */
+
+/* v2.20: 窗口宽度跨过双列断点（1024px）时重排一次（单列 ↔ 双列切换） */
+var lastWide = window.matchMedia ? window.matchMedia('(min-width:1024px)').matches : false;
+window.addEventListener('resize', function(){
+  var w = window.matchMedia('(min-width:1024px)').matches;
+  if(w !== lastWide){ lastWide = w; render(); }
+});
 
 /* 页面切到后台时暂停轮询（省流量/电量），切回来立即刷新 */
 document.addEventListener('visibilitychange', function(){

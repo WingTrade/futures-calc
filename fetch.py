@@ -16,6 +16,8 @@
       · 腾讯备源实测：.INX / .DJI / .IXIC 收盘与新浪逐位一致
         （10-19：7690.73 / 51966.03 / 26430.89）。
   - 换月检测换引擎：主力合约锚定法（v1.16，用户方案，替代价格区间判据为主通道）：
+  - 富时A50 回归（v2.19，2026-10-20）——v1.3 曾因"仅东财有源"移除；实测新浪 hf_CHA50CFD
+    快照/MinLine/日K 全通（当时的判断不成立），按双窗口口径重新接入（见 a50_window）。
       · 原理：主连 hf_CL 的行情流就是当前主力合约的行情流，所以枚举候选月份合约
         快照（hf_CL + YYMM，本月起 6 个月窗口——实测美天然气主力跳 NG2701、
         美原糖跳 RS2703，跨多月换月真实存在，窗口窄了会漏），找与主连
@@ -247,9 +249,15 @@ VARIETIES = [
     ('标准普尔',     'M23',   '100.SPX',    None),   # v1.3: 走美股日K口径
     ('道琼工业',     'M23',   '100.DJIA',   None),   # v1.3: 走美股日K口径
     ('纳斯达克',     'M23',   '100.NDX',    None),   # v1.3: 走美股日K口径
+    # v2.19: 富时A50（SGX，用户要求倒数第4）。组 A50 = 独立双窗口（09:30 前对比昨日 15:00 /
+    # 11:30-13:00 对比今日 11:30），窗口外整行隐藏。无东财 secid —— 东财 104.CN00Y 是
+    # "期指当月连续"拼接口径，与新浪 hf_CHA50CFD 的主连行情不同源，混用会出假涨跌。
+    # 参考价兜底链全部走新浪系（分时 / 日K / 继承）。
+    ('富时A50',      'A50',   None,         'hf_CHA50CFD'),
 ]
 GROUP_CLOSE = {'M23': (23, 0), 'M01': (1, 0), 'M0230': (2, 30)}
 GROUPS = ['M23', 'M01', 'M0230']
+# v2.19: 富时A50 走 A50_GROUP 专属双窗口（a50_window），不进 GROUPS（无固定收盘节点）
 INDEX_SECIDS = {'100.SPX', '100.DJIA', '100.NDX'}
 # v1.2: 美股指数 → 新浪美股日K symbol（展示"最近一根已收盘日线"的开盘→收盘）
 US_INDEX_MAP = {'100.SPX': '.INX', '100.DJIA': '.DJI', '100.NDX': '.IXIC'}
@@ -902,6 +910,35 @@ def decide_mode(now, trade_days):
             return 'm1130'
     return 'night'
 
+# v2.19: 富时A50 显示窗口 —— 用户看盘点与 A50 自身时段错位，单独两个窗口：
+#   窗口1：A股 09:30 开盘前（05:20-09:30）→ 对比【前一交易日 15:00】的价
+#   窗口2：11:30-13:00（A股午休，下午开盘前）→ 对比【今日 11:30】的价
+#   其余时段不显示该行（无看盘意义，A50 16:35 收盘、17:00 接 T+1 段）。
+A50_GROUP = 'A50'
+def a50_window(now, trade_days):
+    """富时A50 当前窗口 → ('ref15prev' | 'ref1130', ref_dt, label) 或 None（窗口外不显示）。
+    ref15prev 的 ref_dt = 前一交易日 15:00（按交易日历回退）；ref1130 = 今日 11:30。
+    周末/非交易日两个窗口都不显示（前一交易日的 15:00 对当天开盘参考意义弱，保持简洁）。"""
+    today = now.date().isoformat()
+    is_trade = (today in trade_days) if trade_days else (now.weekday() < 5)
+    if not is_trade:
+        return None
+    t = now.hour * 60 + now.minute
+    # 窗口2：11:30 - 13:00（13:00 A股午盘开盘，之后看盘意义弱化 → 隐藏）
+    if 11 * 60 + 30 <= t < 13 * 60:
+        return 'ref1130', now.replace(hour=11, minute=30, second=0, microsecond=0), '11:30'
+    # 窗口1：05:20（夜盘段临近尾声）- 09:30（A股开盘）
+    if 5 * 60 + 20 <= t < 9 * 60 + 30:
+        # 前一交易日 15:00：今天往前找最近一个交易日
+        cand = now.replace(hour=15, minute=0, second=0, microsecond=0)
+        cand -= timedelta(days=1)
+        for _ in range(20):
+            ok = (cand.date().isoformat() in trade_days) if trade_days else (cand.weekday() < 5)
+            if ok:
+                return 'ref15prev', cand, '15:00'
+            cand -= timedelta(days=1)
+    return None
+
 def night_ref_point(group, now, trade_days, night_days):
     h, mi = GROUP_CLOSE[group]
     cand = now.replace(hour=h, minute=mi, second=0, microsecond=0)
@@ -1014,6 +1051,14 @@ def main():
             parts.append(f'{GROUP_CLOSE[g][0]:02d}:{GROUP_CLOSE[g][1]:02d}→{dt:%m-%d %H:%M}' if dt else f'{g}:缺')
         ref_desc = '参考(有色01:00/贵金属02:30/其他23:00): ' + '  '.join(parts)
     print(f'模式: {mode}')
+
+    # v2.19: 富时A50 独立双窗口（与商品档位无关）：
+    #   09:30 前对比【前一交易日 15:00】；11:30-13:00 对比【今日 11:30】；其余窗口=None（整行隐藏）。
+    a50_win = a50_window(now, trade_days)
+    if a50_win:
+        print(f"A50窗口: {a50_win[0]} ref={a50_win[1]:%m-%d %H:%M}（{a50_win[2]}）")
+    else:
+        print('A50窗口: 外（本行隐藏）')
 
     # 当前价
     secids = sorted({v[2] for v in VARIETIES if v[2]})
@@ -1128,8 +1173,16 @@ def main():
         if '原油' in name:
             # 名称不带组标记；两行时的区分（23:00 / 02:30）由「起始时间」列呈现
             name = name.split('(')[0]
-        ref_dt, _ = ref_map.get('IDX' if secid in INDEX_SECIDS else group, (None, None))
-        ref_show = ref_dt
+        # v2.19: 富时A50 —— 独立双窗口，窗口外整行跳过（不产生任何行数据）
+        if group == A50_GROUP:
+            if not a50_win:
+                continue
+            a50_kind, a50_ref_dt, a50_label = a50_win
+            ref_dt, ref_show = a50_ref_dt, a50_ref_dt
+        else:
+            a50_kind = None
+            ref_dt, _ = ref_map.get('IDX' if secid in INDEX_SECIDS else group, (None, None))
+            ref_show = ref_dt
         ref_text = None   # v1.2: 特判品种直接给出 ref 文本（美股指数等）
         sym = (sina_code[3:] if sina_code.startswith('hf_') else sina_code) if sina_code else None
         bars_ml = ml_by_sym.get(sym, []) if sym else []
@@ -1148,6 +1201,33 @@ def main():
         close, note = None, ''
         if ref_dt is None:
             note = '缺'
+        elif name == '富时A50':
+            # v2.19: A50 双窗口取价（SGX T+1 时段：17:00-05:15 夜段 + 09:00-16:35 日段）。
+            #   MinLine 的表 = "当前交易时段"（09:00 新日段开盘时滚动），每天只有一张：
+            #   窗口2（11:30-13:00）今日 11:30 的笔就在当前表里 → 直接按节点取；
+            #   窗口1（09:30 前）"前一交易日 15:00"在上一张已滚动的表里 → 当前表取不到，
+            #   兜底链：MinLine(≤15:00 最后一笔, 覆盖"表尚未滚动"的清晨轮次)
+            #         → 日K前一交易日那根 close（16:35 收盘口径，时间跨度略长但方向正确）
+            #         → v1.8 继承（同 ref 沿用上一轮云端值）。
+            if bars_ml:
+                try:
+                    close, st, hit_dt = ref_price_from_bars(bars_ml, ref_dt, max_gap_hours=40,
+                                                            now=now, allow_stale=True)
+                except Exception:
+                    close = None
+            if close is None and a50_kind == 'ref15prev':
+                # 日K兜底：前一交易日那根 close = 16:35 收盘。仅窗口1用（有总比缺好）；
+                # ref_text 标注真实口径（15:00笔取不到时显示 16:35 收盘），不冒充 15:00。
+                try:
+                    _d, _c = sina_dailyk_closed_bar('CHA50CFD', now, exclude_today=True)
+                    if _c is not None and _d == ref_dt.date().isoformat():
+                        close = _c
+                        ref_text = f'{ref_dt:%m-%d} 16:35收'
+                        hit_dt = ref_dt.replace(hour=16, minute=35)
+                except Exception:
+                    close = None
+            if close is None:
+                note = '缺'   # v1.8 继承机制按同 ref 顶住
         elif name == '伦敦银现货':
             # v1.1: 新浪当日分时优先（新鲜），5 日线兜底（可跨日）
             if bars_ml:
@@ -1487,6 +1567,9 @@ def main():
     #   ① 参考价与快照"昨结算"（当前合约）偏离 > 2%；
     #   ② 参考价不在最近 2 根日K的 [min(low), max(high)] 区间内（±0.5% 容差）。
     # 修正：参考价 := 昨结；ref := '昨结'（页面"起始时间"列显示该标注）；note := '换月'。
+    # v2.19: 富时A50 不参与旧通道（它的"参考价"是双窗口口径，不来自当段分时表的连续价，
+    # 偏离昨结是常态 —— 例：窗口1 的基准是昨日 15:00/16:35，与昨结 16:35 收盘本就不同）。
+    # A50 换月完全依赖锚定法（hf_CHA50CFD 实测能锚到具体月份合约）。
     month_fix = 0
     month_watch = 0
     for row in rows:
@@ -1499,6 +1582,8 @@ def main():
         # 锚定法说没换月就是没换月，不让旧通道的结论盖过它。
         if sym in contracts_now:
             continue
+        if row['name'] == '富时A50':
+            continue   # v2.19: 双窗口口径不适用旧通道，换月全靠锚定法
         if '换月' in (row.get('note') or ''):
             continue   # 本轮已被锚定法修正过
         bars_row = ml_by_sym.get(sym) or []
@@ -1559,7 +1644,7 @@ def main():
         'ref_desc': ref_desc,
         # v2.16.1: 前端版本号 —— 页面拿它和自己内置的 UI_VER 比对，
         # 不一致就自动重载（解决"页面常驻打开时旧 JS 永远不更新"的问题）
-        'ui': '2.17',
+        'ui': '2.19',
         'em_ok': em_ok,
         'sina_ok': sina_ok,
         'kline_fail': kline_fail,
