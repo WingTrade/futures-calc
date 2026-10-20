@@ -1644,7 +1644,7 @@ def main():
         'ref_desc': ref_desc,
         # v2.16.1: 前端版本号 —— 页面拿它和自己内置的 UI_VER 比对，
         # 不一致就自动重载（解决"页面常驻打开时旧 JS 永远不更新"的问题）
-        'ui': '2.19',
+        'ui': '2.20',
         'em_ok': em_ok,
         'sina_ok': sina_ok,
         'kline_fail': kline_fail,

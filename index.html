@@ -235,7 +235,7 @@ var IDX_NAMES = { '标准普尔':1, '道琼工业':1, '纳斯达克':1, '富时A
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.19';      /* v2.17: 前端版本号，与 fetch.py 写入 data.json 的 ui 字段对齐；
+var UI_VER = '2.20';      /* v2.20: 双列修复（tr 包裹）+ 富时A50；与 fetch.py 写入 data.json 的 ui 字段对齐；
                              不一致时页面自动重载拿新 HTML（见 loadJson 的版本自检） */
 var CACHE_KEY = 'waiPanPageCacheV1';
 /* data.json 尚未带 code 字段（旧版）时，用品种名兜底匹配腾讯代码 */
@@ -928,12 +928,14 @@ function render(){
     var html = rowHtml({name:r.name, close:bq.close, last:last, chg:chg, pct:pct,
                         flag:r.flag, ref:bq.ref, mark:bq.mark, markTip:bq.markTip,
                         refTip:bq.refTip, src:stag, srcTip:srcTagTip(stag, r, q)});
-    if(IDX_NAMES[r.name]){ idxRows.push(html); continue; }   /* v2.20: 股指行进右列 */
-    rowsHtml.push(html);
+    /* v2.20 修复：innerHTML 批量写入必须带 <tr> 包裹 —— rowHtml 返回的是裸 <td> 串，
+       裸 td 直接塞 tbody，HTML 解析器只会产出第一行（其余全部丢弃），页面只剩 1 行。 */
+    if(IDX_NAMES[r.name]){ idxRows.push('<tr>'+html+'</tr>'); continue; }   /* v2.20: 股指行进右列 */
+    rowsHtml.push('<tr>'+html+'</tr>');
   }
   /* 上证指数临时行（仅 10:15-10:30 / 11:30-13:30 出现，见 sseRowHtml） */
   var sseHtml = sseRowHtml();
-  if(sseHtml){ idxRows.push(sseHtml); }              /* v2.20: 上证属股指参考，归右列 */
+  if(sseHtml){ idxRows.push('<tr>'+sseHtml+'</tr>'); }   /* v2.20: 上证属股指参考，归右列 */
   var wide = window.matchMedia && window.matchMedia('(min-width:1024px)').matches;
   if(wide && idxRows.length){
     /* v2.20 双列（电脑浏览器 ≥1024px）：左列商品期货，右列股票股指相关。
