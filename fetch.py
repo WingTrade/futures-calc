@@ -1570,7 +1570,7 @@ def main():
         'rows': rows,
     }
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data.json')
-    with open(out, 'w', encoding='utf-8') as f:
+    with open(out, 'w', encoding='utf-8', newline='\n') as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
     # v1.10: 顺带把"实际取价笔"的偏移情况打到日志里，方便一眼看出稀疏品种
     _gaps = [(r['name'], r['gap_min']) for r in rows if r.get('gap_min') is not None]
@@ -1639,7 +1639,7 @@ def main_us_only():
     # 补齐后三行日期一致，避免表里混两种口径
     changed += align_us_index_rows(data.get('rows', []), now)
     if changed:
-        with open(out, 'w', encoding='utf-8') as f:
+        with open(out, 'w', encoding='utf-8', newline='\n') as f:
             json.dump(data, f, ensure_ascii=False, indent=1)
         print(f'us-only 完成: {changed} 行更新, 已写入 {out}, 耗时 {time.time() - t0:.0f} 秒')
     else:
