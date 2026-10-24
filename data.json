@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-10-24 08:28",
+ "generated_at": "2026-10-24 10:16",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
@@ -7,7 +7,7 @@
  "ui": "2.21",
  "em_ok": false,
  "sina_ok": true,
- "kline_fail": 19,
+ "kline_fail": 21,
  "contracts": {
   "CL": "CL2612",
   "OIL": "OIL2701",
@@ -56,31 +56,29 @@
   },
   {
    "name": "布伦特原油",
-   "close": 111.379,
+   "close": 116.114,
    "last": 112.104,
-   "chg": 0.7249999999999943,
-   "pct": 0.6509306063081859,
+   "chg": -4.010000000000005,
+   "pct": -3.453502592280005,
    "flag": false,
-   "note": "换月",
+   "note": "",
    "code": "hf_OIL",
    "ref": "10-23 23:00",
    "ref_actual": "10-23 23:00",
-   "gap_min": 0,
-   "roll": "fix"
+   "gap_min": 0
   },
   {
    "name": "布伦特原油",
-   "close": 111.694,
+   "close": 116.712,
    "last": 112.104,
-   "chg": 0.4099999999999966,
-   "pct": 0.3670743280749159,
+   "chg": -4.608000000000004,
+   "pct": -3.9481801357186956,
    "flag": false,
-   "note": "换月",
+   "note": "",
    "code": "hf_OIL",
    "ref": "10-24 02:30",
    "ref_actual": "10-24 02:30",
-   "gap_min": 0,
-   "roll": "fix"
+   "gap_min": 0
   },
   {
    "name": "美黄金",
@@ -375,7 +373,7 @@
    "chg": -53.52000000000044,
    "pct": -0.2057760317061203,
    "flag": false,
-   "note": "防退",
+   "note": "",
    "code": null,
    "ref": "10-23美",
    "ref_actual": null,
