@@ -625,6 +625,48 @@ def sina_active_contracts(sina_map, now):
         time.sleep(0.2)                        # 温和请求
     return out
 
+def month_kline_range(symbol, n=2, max_stale_days=5, now=None):
+    """v1.17: 【月份合约】日K最近 n 根有效根的 [min(low), max(high)]，供换月口径自检。
+
+    自检原理：参考时点本来就在这两根日K覆盖的时段里，与当前主力【同口径】的
+    参考价不可能跑出这个区间；出区间 = 参考价是老合约口径（换月失真）。
+    必须用月份合约日K，不能用主连日K —— 主连日K在换月点前后是拼接的
+    （实测 2026-10-23 那根 O 112.96 > H 112.45 自相矛盾），区间被老合约撑宽会漏检。
+
+    有效根 = 日期字段可解析。新浪月份合约日K混有坏日期根（实测 OIL2701 夹着
+    '2026-10-21' 这类根）；LME 月份合约日K残缺（CAD2611 只有 1 根 09-01 旧数据）。
+    有效根不足 n 根、或最近一根距今超过 max_stale_days（长假停市/残缺数据，
+    时段已不覆盖参考点，正常价也可能出区间）→ 一律返回 None：宁漏检不误伤。"""
+    now = now or now_cn()
+    u = ('https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20d=/'
+         f'GlobalFuturesService.getGlobalFuturesDailyKLine?symbol={symbol}')
+    try:
+        txt = http_get(u, SINA_HEADERS)
+        m = re.search(r'\((\[.*\])\)', txt, re.S)
+        if not m:
+            return None
+        arr = json.loads(m.group(1))
+    except Exception:
+        return None
+    if not isinstance(arr, list):
+        return None
+    ks = []
+    for k in arr:
+        try:
+            d = datetime.strptime(str(k.get('date', '')), '%Y-%m-%d').date()
+        except (ValueError, TypeError):
+            continue
+        try:
+            ks.append((d, float(k['low']), float(k['high'])))
+        except (ValueError, KeyError, TypeError):
+            continue
+    if len(ks) < n:
+        return None
+    ks = ks[-n:]
+    if (now.date() - ks[-1][0]).days > max_stale_days:
+        return None
+    return min(x[1] for x in ks), max(x[2] for x in ks)
+
 def sina_dailyk_highlow_range(symbol, n=2):
     """v1.9: 取最近 n 根日K的 [min(low), max(high)]，供换月检测的区间校验用。
     失败返回 None（调用方跳过检测，不影响主流程）。"""
@@ -1432,6 +1474,7 @@ def main():
             # 否则下一轮页面小标消失，且 close 仍是修正口径却没了说明
             row['roll'] = 'fix'
             row['note'] = '换月'
+            row['roll_src'] = p.get('roll_src')   # v1.17: 原参考时点一并继承，续存链不断
         elif row.get('note') == '缺':
             row['note'] = '继'
         if row['close'] is not None and row['last'] is not None and row['close'] > 0:
@@ -1529,6 +1572,7 @@ def main():
             if not ps or ps <= 0:
                 print(f'换月修正跳过(无昨结): {row["name"]}')
                 continue
+            row['roll_src'] = row.get('ref')   # v1.17: 记下原参考时点，供跨轮续存匹配
             row['close'] = ps
             row['ref'] = '换月'
             row['note'] = '换月'
@@ -1542,6 +1586,136 @@ def main():
         print(f"换月修正(锚定法): {row['name']} {old_c}→{new_c}，参考价 -> {row['close']}")
     if roll16_fix:
         print(f'换月修正(锚定法): {roll16_fix} 行')
+
+    # ---------------- v1.17：换月修正的跨轮续存 + 参考价口径自检（2026-10-24 布伦特事故） ----------------
+    # 事故复盘：锚定法换月修正只在「锚变化的那一轮」执行 —— 10-24 08:28 轮修正成功
+    #（布伦特 close=OIL2701 口径 111.379，实际 +0.65%），但 10:16 轮锚没再变、不做修正，
+    # 正常取价从主连【拼接】分时表把老合约口径价 116.114 取了回来，覆盖修正值
+    # → 页面假跌 -3.45%（日线根本没有这种跌幅，同期 WTI 还是涨的）。
+    # 根因：roll='fix' 身份只在「本轮取不到价」时才继承；本轮取到了价（口径错）身份即丢，
+    # 修正链一断就永久失效。
+    # 修复两级：
+    #   ① 续存：上一版同行是修正行、本轮锚没再变 → 整套沿用上一版修正口径
+    #    （穿越口径最优；last 仍用本轮最新，chg/pct 重算）；
+    #   ② 自检（用户思路"参考日线"的落地，不依赖历史链）：锚定成功的品种，参考价
+    #     必须落在【当前主力月份合约】最近 2 根日K的 [min(low), max(high)] 内 ——
+    #     参考时点本来就在这两根日K覆盖的时段里，同口径价出区间物理上不可能；
+    #     出区间 = 参考价是老合约口径。失真幅度 ≈ 两合约价差，小到检不出的失真
+    #     本身不痛（自适应阈值）。触发后两级修正与锚定法同款：穿越 → 退昨结。
+    # 边界：A50 双窗口（v2.19）跳过 —— 窗口口径特殊，维持「换月全靠锚定法」现状；
+    #       月份合约日K拉不到 / 有效根不足 / 数据过旧（见 month_kline_range）
+    #       → 放弃自检维持原值，宁漏检不误伤。
+    fix17_keep = fix17_kline = 0
+    prev_fix = {}      # (name, 原参考时点文本) -> 上一版修正行（roll='fix 且有 close）
+    for _r in prev_rows:
+        if _r.get('roll') == 'fix' and _r.get('close') is not None:
+            # 退化口径行 ref 已被改成「换月」，用 roll_src 还原原时点；穿越口径行 ref 本身就是原时点
+            prev_fix.setdefault((_r.get('name'), _r.get('roll_src') or _r.get('ref')), _r)
+    _k17 = {}          # 月份合约日K区间缓存：contract -> (lo, hi) | False（拉不到/不可用）
+    for row in rows:
+        code = row.get('code')
+        if not code or not code.startswith('hf_') or row.get('close') is None:
+            continue
+        sym = code[3:]
+        if sym == 'CHA50CFD':
+            continue               # A50 双窗口（v2.19）：口径特殊，跳过续存与自检
+        info = contracts_now.get(sym)
+        if not info:
+            continue               # 锚定判不出主力：不猜口径，维持原值（旧通道兜底）
+        if '换月' in (row.get('note') or '') or row.get('roll') == 'fix':
+            continue               # 本轮已被修正（锚定法 / 旧通道 / 续存继承），不重复处理
+        if sym in rollover_syms:
+            continue               # 本轮刚判换月：上面 v1.16 段已修
+        # ① 续存：上一版同行是修正行 + 本轮锚没再变 → 沿用上一版修正口径
+        p17 = prev_fix.get((row['name'], row.get('ref')))
+        if p17 is not None and prev_contracts.get(sym) == info['contract']:
+            row['close'] = p17['close']
+            row['ref'] = p17.get('ref')
+            row['ref_actual'] = p17.get('ref_actual')
+            row['gap_min'] = p17.get('gap_min')
+            row['roll_src'] = p17.get('roll_src')
+            row['note'] = '换月'
+            row['roll'] = 'fix'
+            if row['last'] is not None and row['close'] > 0:
+                row['chg'] = row['last'] - row['close']
+                row['pct'] = row['chg'] / row['close'] * 100
+            fix17_keep += 1
+            print(f"换月续存: {row['name']}（{row.get('ref')}）沿用上一版修正口径 {row['close']}")
+            continue
+        # ② 自检：参考价 vs 当前主力合约日K区间
+        rng17 = _k17.get(info['contract'])
+        if rng17 is None:
+            rng17 = month_kline_range(info['contract']) or False
+            _k17[info['contract']] = rng17
+            time.sleep(0.15)
+        if not rng17:
+            continue
+        lo17, hi17 = rng17
+        if ('hf_' + sym) in SINA_CENT_TO_DOLLAR:   # 美铜：日K是美分，换算成美元再比
+            lo17, hi17 = lo17 / 100.0, hi17 / 100.0
+        _pad17 = (hi17 - lo17) * 0.02
+        if lo17 - _pad17 <= row['close'] <= hi17 + _pad17:
+            continue               # 区间内：口径正常
+        # 出区间 → 参考价口径失真，两级修正（与锚定法同款）
+        ref_dt17 = None
+        _m17 = re.match(r'^(\d{2})-(\d{2}) (\d{2}):(\d{2})$', row.get('ref') or '')
+        if _m17:
+            try:
+                ref_dt17 = now.replace(month=int(_m17.group(1)), day=int(_m17.group(2)),
+                                       hour=int(_m17.group(3)), minute=int(_m17.group(4)),
+                                       second=0, microsecond=0)
+                if (ref_dt17 - now).days > 180:
+                    ref_dt17 = ref_dt17.replace(year=ref_dt17.year - 1)
+                elif (now - ref_dt17).days > 180:
+                    ref_dt17 = ref_dt17.replace(year=ref_dt17.year + 1)
+            except ValueError:
+                ref_dt17 = None
+        new_close17, new_hit17 = None, None
+        if ref_dt17 is not None:
+            if info['contract'] not in bars_by_contract:
+                try:
+                    bars_by_contract[info['contract']] = sina_minline_today(info['contract'])
+                except Exception:
+                    bars_by_contract[info['contract']] = []
+            _bc17 = bars_by_contract[info['contract']]
+            if _bc17:
+                try:
+                    new_close17, _st17, new_hit17 = ref_price_from_bars(
+                        _bc17, ref_dt17, max_gap_hours=26, now=now, allow_stale=True)
+                except Exception:
+                    new_close17 = None
+        # 护栏：穿越价与当前价偏差 > 25% → 明显异常（如单位口径不符），放弃穿越退昨结
+        if new_close17 is not None and row['last'] is not None and row['last'] > 0 \
+                and abs(new_close17 - row['last']) / row['last'] > 0.25:
+            new_close17 = None
+        old_close17 = row['close']
+        row['roll_src'] = row.get('ref')
+        if new_close17 is not None:
+            # 穿越成功：参考价 = 新合约在原时点的真实价，ref 文本保持原时点
+            row['close'] = new_close17
+            row['ref_actual'] = f'{new_hit17:%m-%d %H:%M}' if new_hit17 else None
+            row['gap_min'] = (int(round((ref_dt17 - new_hit17).total_seconds() / 60.0))
+                              if new_hit17 and ref_dt17 else None)
+        else:
+            ps17 = info.get('prev_settle')
+            if not ps17 or ps17 <= 0:
+                row.pop('roll_src', None)
+                print(f'换月自检跳过(无昨结): {row["name"]}')
+                continue               # 无昨结可用：放弃修正，维持原值
+            row['close'] = ps17
+            row['ref'] = '换月'
+            row['ref_actual'] = None
+            row['gap_min'] = None
+        row['note'] = '换月'
+        row['roll'] = 'fix'
+        if row['last'] is not None and row['close'] > 0:
+            row['chg'] = row['last'] - row['close']
+            row['pct'] = row['chg'] / row['close'] * 100
+        fix17_kline += 1
+        print(f"换月自检修正: {row['name']} 参考价 {old_close17} -> {row['close']}"
+              f"（超出 {info['contract']} 日K区间 [{lo17}, {hi17}]，主力锚 {info['contract']}）")
+    if fix17_keep or fix17_kline:
+        print(f'换月续存: {fix17_keep} 行沿用, 自检修正: {fix17_kline} 行')
 
     # v1.16.2: 换月去重 —— 原油这类同品种分两档（23:00 / 02:30）的品种，
     # 换月修正后两行都退化为「同一个新合约昨结 + 同一个最新价」，数字完全重复，
