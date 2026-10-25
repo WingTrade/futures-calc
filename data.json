@@ -7,7 +7,7 @@
  "ui": "2.21",
  "em_ok": false,
  "sina_ok": true,
- "kline_fail": 23,
+ "kline_fail": 21,
  "contracts": {
   "CL": "CL2612",
   "OIL": "OIL2701",
