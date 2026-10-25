@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-10-25 10:16",
+ "generated_at": "2026-10-25 10:42",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
@@ -7,7 +7,7 @@
  "ui": "2.21",
  "em_ok": false,
  "sina_ok": true,
- "kline_fail": 21,
+ "kline_fail": 22,
  "contracts": {
   "CL": "CL2612",
   "OIL": "OIL2701",
