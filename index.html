@@ -161,7 +161,7 @@
   </div>
   <div class="tip">实时最新价 · 新浪/腾讯双通道每 15 秒刷新 · 起始价按节点定时更新</div>
   <div class="tip">双绿灯，全部品种均为实时；红灯异常时，部分品种降级为延时</div>
-  <div class="tip" id="tipMark">「起始时间」列 = 该品种实际取到那一笔价的时刻（成交稀疏的品种会比整点早或晚几分钟，属正常）·只有"这行的价确实是旧时刻的"才标出时刻（如「分时 14:11」）·三条实时路都没拿到时标「缓存」</div>
+  <div class="tip" id="tipMark">「起始时间」列 = 该品种实际取到那一笔价的时刻（成交稀疏的品种会比整点早或晚几分钟，属正常）·只有"这行的价确实是旧时刻的"才标出时刻（如「分时 14:11」）·三条实时路都没拿到时标「缓存」·「切月中」= 实时通道口径与起始价口径不一致（主力合约换月拉锯中），该行涨跌幅是混口径、暂不可信，下一轮云端重锚自愈</div>
 </div>
 
 <script>
@@ -232,7 +232,8 @@ var IDX_NAMES = { '标准普尔':1, '道琼工业':1, '纳斯达克':1, '富时A
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.21';      /* v2.21: 双列改两个独立单列块（去组标题、独立卡片）；与 fetch.py 写入 data.json 的 ui 字段对齐；
+var UI_VER = '2.22';      /* v2.22: 昨结指纹「切月中」标记（换月拉锯脱节 15 秒内可见，配合 fetch.py v1.18 的 ref_prev/ref_prev_date 行字段）；
+                             与 fetch.py 写入 data.json 的 ui 字段对齐；
                              不一致时页面自动重载拿新 HTML（见 loadJson 的版本自检） */
 var CACHE_KEY = 'waiPanPageCacheV1';
 /* data.json 尚未带 code 字段（旧版）时，用品种名兜底匹配腾讯代码 */
@@ -600,6 +601,33 @@ function baseQuoteOf(r){
      原糖这类"节点时刻还没开盘"也同样：时间列显示 15:30 一看就懂。 */
   return { close: r.close, ref: r.ref_actual || r.ref, mark: '', markTip: '', refTip: '' };
 }
+/* ---------- v2.22: 昨结指纹 —— 换月拉锯脱节的实时判定（15 秒粒度） ---------- */
+/* 原理：昨结算是盘中常数 = 合约口径的稳定指纹。云端每轮把「起始价口径合约的昨结」
+   写进行字段 ref_prev（fetch.py v1.18）；本页实时通道（腾讯/新浪快照 f[7]）每 15 秒
+   都在返回主连昨结。两者同交易日却不相等（>0.1%）= 实时口径 ≠ 起始价口径
+   = 换月拉锯期主连在两合约间振荡 —— 锚定法只按轮次跑、轮次间隙没人盯的盲区
+   （2026-10-26 美豆粕事故：19:30 轮被 GitHub 丢弃，16:08~23:01 之间口径摆回旧约
+   无人发现，页面涨跌幅混口径失真 +0.31%、方向反），从此前端 15 秒内自见。
+   触发时「起始时间」列标「切月中」，该行涨跌幅是混口径、暂不可信。 */
+function prevFingerprintMark(r){
+  if(!r || r.ref_prev == null || !(r.ref_prev > 0)) return null;
+  var sc = sinaCodeOf(r), q = null;
+  /* 取昨结的通道与 quoteOf 同序（新浪优先、腾讯兜底），保证与行显示的实时价同源 */
+  if(sc && state.sn && state.sn[sc] && state.sn[sc].prev != null) q = state.sn[sc];
+  if(!q){
+    var t = state.tx && state.tx[rowCode(r)];
+    if(t && t.prev != null) q = t;
+  }
+  if(!q || q.prev == null || !(q.prev > 0)) return null;
+  /* 交易日不同（云端轮次与现在跨了结算更新窗口，昨结本身会变）→ 不判，防误报 */
+  if(q.prevDate && r.ref_prev_date && q.prevDate !== r.ref_prev_date) return null;
+  var gap = Math.abs(q.prev - r.ref_prev) / r.ref_prev;
+  if(gap <= 0.001) return null;   /* 昨结差 <0.1% 的口径混淆，涨跌幅失真同样 <0.1%，无害不打扰 */
+  return { mark: '切月中',
+           markTip: '实时通道昨结 ' + q.prev + ' 与起始价口径昨结 ' + r.ref_prev +
+                    '（差 ' + (gap * 100).toFixed(2) + '%）—— 主力合约换月拉锯中，' +
+                    '实时价与起始价不同口径，本行涨跌幅暂不可信，等下一轮云端重锚自愈' };
+}
 /* 最新价来源标记：延时源（TradingView 兜底 / 美燃油 fuHO） */
 function srcTag(r, q){
   if(!q) return '';
@@ -913,6 +941,8 @@ function render(){
     var last = (q && q.last!=null) ? q.last : r.last;
     /* v2.10: 基准价 = 云端值（默认）或本页即时现算值（云端档位落后时） */
     var bq = baseQuoteOf(r);
+    var pm22 = prevFingerprintMark(r);        /* v2.22: 昨结指纹（换月拉锯脱节实时可见） */
+    if(pm22){ bq.mark = pm22.mark; bq.markTip = pm22.markTip; }
     var chg = r.chg, pct = r.pct;
     if(q && bq.close!=null && last!=null && bq.close>0){
       chg = last - bq.close;                     /* 前端即时重算：最新价 - 起始价 */
@@ -1115,23 +1145,30 @@ async function refreshTx(){
     var tx = {}, maxT = '', maxD = '';
     while((m = re.exec(text))){
       var code = m[1], body = m[2];
-      var last = null, tstr = '', dstr = '';
+      var last = null, tstr = '', dstr = '', pval = null;
       if(code.indexOf('fu') === 0){
         /* 波浪格式（延时行情，时间戳为美东时区）：f[3]=最新价、f[30]=时间 */
         var fb = body.split('~');
         if(fb.length > 30 && fb[3]){ last = parseFloat(fb[3]); tstr = fb[30] || ''; }
       }else{
-        /* 逗号格式（实时，时间戳为北京时间）：f[0]=最新价、f[6]=时间、f[12]=数据日期 */
+        /* 逗号格式（实时，时间戳为北京时间）：f[0]=最新价、f[6]=时间、f[7]=昨结算、f[12]=数据日期 */
         var fc = body.split(',');
         if(fc.length > 12 && fc[0]){
           last = parseFloat(fc[0]);
           if(code === 'hf_HG') last = last / 100;   /* 美铜：接口为美分/磅，页面用美元/磅（与 data.json 同口径） */
           tstr = fc[6] || '';
           dstr = fc[12] || '';   /* v2.8: 数据日期，跨午夜比较用 */
+          /* v2.22: 昨结算（f[7]）—— 口径指纹，供「切月中」判定（见 prevFingerprintMark） */
+          pval = parseFloat(fc[7]);
+          if(!isNaN(pval) && pval > 0){
+            if(code === 'hf_HG') pval = pval / 100;   /* 美铜昨结同为美分口径 */
+          }else{
+            pval = null;
+          }
         }
       }
       if(last == null || isNaN(last)) continue;
-      tx[code] = { last:last, time:tstr };
+      tx[code] = { last:last, time:tstr, prev:pval, prevDate:dstr };   /* v2.22: prev=昨结口径指纹 */
       /* 头部「实时」时间只取实时通道（hf_ 系）的时间戳，延时品种不参与比较；
          v2.8: 按「日期+时间」比较，避免昨晚 22:59:57 盖过今天的时间戳 */
       if(code.indexOf('fu') !== 0){
@@ -1204,7 +1241,11 @@ async function refreshSina(){
         if(isNaN(last)) continue;
         var tstr = fb[6] || '';
         var dstr = fb[12] || '';            /* v2.8: 数据日期（如马棕油昨日收盘 22:59:57 属前一日） */
-        sn[code] = { last:last, time:tstr };
+        /* v2.22: 昨结算（f[7]，与腾讯快照同字段位）—— 口径指纹，供「切月中」判定 */
+        var pv = parseFloat(fb[7]);
+        if(isNaN(pv) || pv <= 0) pv = null;
+        if(pv != null && code === 'hf_HG') pv = pv / 100;   /* 美铜昨结为美分口径 */
+        sn[code] = { last:last, time:tstr, prev:pv, prevDate:dstr };
         var key = dstr + ' ' + tstr;
         if(key > (maxD + ' ' + maxT)){ maxT = tstr; maxD = dstr; }
       }

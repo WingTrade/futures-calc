@@ -1,7 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.16）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.18）
 ======================================================
+  - 换月拉锯期口径振荡根治（v1.18，2026-10-26 美豆粕事故）：
+      · 事故：10-26 16:08 轮锚定 SM→SM2701 并完成换月修正（当时主连口径真是 2701，
+        修正本身正确）；但 19:30 轮被 GitHub 丢弃（schedule 免费档常态），16:08~23:01
+        之间无任何轮次跑锚定 —— 主连口径在 20:44 摆回 SM2612（昨结 346.10 与
+        SM2612 精确相等，三证齐），页面起始价 2701 口径 337.67 vs 实时价 2612 口径
+        338.70，涨跌幅虚高 +0.31%（真实约 -0.06%，方向反）。
+      · 根因：锚定法只要在跑，多小的价差都能发现（判据是"同价同刻"的身份匹配，
+        与两合约价差无关）；它不在跑（轮次间隙 / GitHub 丢任务），多大的价差都
+        发现不了。换月拉锯期（10 月底豆粕 12月→1月移仓，两合约成交持仓咬得近）
+        主连口径来回摆，摆动恰好落在轮次间隙就是盲区。
+      · 修复三层（独立生效）：
+        L1 昨结指纹：每行写 ref_prev（起始价口径合约的昨结算）+ ref_prev_date
+           （该昨结的数据日期）。前端实时通道快照 f[7] 每 15 秒都返回主连昨结，
+           与 ref_prev 同交易日比对，不等（>0.1%）= 口径脱节 → 页面「起始时间」
+           列标「切月中」。轮次间隙的振荡从此 15 秒内可见（前端 v2.22 配套）。
+           口径对应关系：锚定合约 = 起始价口径合约（正常取价走主连分时表 = 锚定
+           合约口径；换月修正/续存后 close 也是锚定合约口径，自洽）。
+        L2 锚定去抖：判出锚变化的品种，等 30 秒重拉快照二次锚定。两次一致才
+           确认换月（正常走修正）；二次摆回旧锚 / 判不出 → 锚定结果按旧锚处理
+           （contracts_now 改回旧锚，续存链/指纹链不断），本轮不触发换月修正。
+           防的是"瞬时摆动误触发修正把起始价切到振荡口径"（宁可晚一轮，不切错）。
+        L3 夜盘保险轮：fetch.yml 新增北京 20:45 预触发 cron（落地约 21:11-21:21），
+           把夜盘断档从约 7 小时压到约 2.5 小时，同时赶在 21:00 夜盘看盘后不久
+           完成一次重锚 + ref_prev 刷新。
   - 美股三行「同批对齐」（v2.18，2026-10-20 纳指滞留事故）：
       · 事故：07:45 --us-only 轮与 08:00 完整轮落地时，新浪 .IXIC 的 10-19 日线尚未落库，
         而 .INX / .DJI 已落库 → 表里标普/道指是 10-19 口径，纳指停在 10-16，
@@ -574,7 +598,7 @@ def sina_active_contracts(sina_map, now):
         原判据在跨秒瞬间失效，正是这次误判的入口。
     判不出的品种不进结果（调用方跳过，走原有价格区间检测兜底）。
 
-    返回 {sym: {'contract': 'CL2612', 'prev_settle': float|None}}。"""
+    返回 {sym: {'contract': 'CL2612', 'prev_settle': float|None, 'date': '2026-10-26'|None}}。"""
     out = {}
     syms = sorted({c[3:] for c in sina_map if c.startswith('hf_')})
     for sym in syms:
@@ -621,7 +645,10 @@ def sina_active_contracts(sina_map, now):
             ps = q.get('prev_settle')
             if ps is not None and cent:
                 ps /= 100.0
-            out[sym] = {'contract': found[3:], 'prev_settle': ps}
+            # v1.18: date = 主连快照的数据日期（f[12]），供前端昨结指纹做"同交易日"校验
+            #（跨结算更新窗口昨结会变，不同日不比对，防误报）。
+            out[sym] = {'contract': found[3:], 'prev_settle': ps,
+                        'date': main_q.get('date')}
         time.sleep(0.2)                        # 温和请求
     return out
 
@@ -1206,6 +1233,47 @@ def main():
             rollover_syms[_sym] = (_pc, _info['contract'])
     if rollover_syms:
         print(f'换月判定(锚定法): {rollover_syms}')
+
+    # ---------------- v1.18 (L2): 锚变化去抖 ----------------
+    # 换月拉锯期（10 月底豆粕 12月→1月移仓，两合约成交持仓咬得近）主连口径会在
+    # 两个合约间来回摆。锚定是轮次级采样，单次判"锚变了"可能只是瞬时摆动 ——
+    # 直接修正会把起始价切到振荡口径，下一轮又切回来，页面来回跳。
+    # 规则：等 30 秒重拉主连+候选快照重新锚定（二次采样）：
+    #   · 二次锚 == 一次锚 → 确认换月，正常走修正；
+    #   · 二次摆回旧锚 / 判不出 / 摆到第三个合约 → 锚定结果按【旧锚】处理
+    #    （contracts_now 改回旧锚：写盘锚不变、v1.17 续存链不断、ref_prev 指向
+    #      起始价真实口径），本轮不触发换月修正，下一轮再看；
+    #   · 二次采样网络失败 → 同样按旧锚保守处理（宁可晚一轮修正，不切错口径）。
+    # 代价：仅在有锚变化的轮次发生，每品种 +30 秒。
+    if rollover_syms:
+        for _sym, (_old, _new) in list(rollover_syms.items()):
+            try:
+                time.sleep(30)
+                _cands = ['hf_' + _sym]
+                for _k in range(6):
+                    _mm = (now.month - 1 + _k) % 12 + 1
+                    _yy = now.year + (now.month - 1 + _k) // 12
+                    _cands.append('hf_%s%02d%02d' % (_sym, _yy % 100, _mm))
+                _q2 = sina_snapshot(_cands)
+                _m2 = _q2.get('hf_' + _sym)
+                if not _m2 or not _m2.get('last'):
+                    raise RuntimeError('二次快照无主连报价')
+                _old_prev = (_q2.get('hf_' + _old) or {}).get('prev_settle')
+                _re2 = sina_active_contracts({'hf_' + _sym: _m2}, now)
+                _rc = (_re2.get(_sym) or {}).get('contract')
+                if _rc == _new:
+                    print(f'锚定去抖: {_sym} {_old}→{_new} 二次采样一致，按换月处理')
+                    continue
+                rollover_syms.pop(_sym)
+                contracts_now[_sym] = {'contract': _old, 'prev_settle': _old_prev,
+                                       'date': _m2.get('date')}
+                print(f'锚定去抖: {_sym} 一次锚 {_old}→{_new}，二次采样={_rc or "判不出"}，'
+                      f'按旧锚 {_old} 处理，本轮不触发换月')
+            except Exception as _e:
+                rollover_syms.pop(_sym)
+                contracts_now[_sym] = {'contract': _old, 'prev_settle': None, 'date': None}
+                print(f'锚定去抖: {_sym} 二次采样异常({type(_e).__name__})，'
+                      f'按旧锚 {_old} 保守处理')
 
     # 组装行
     rows = []
@@ -1806,6 +1874,32 @@ def main():
     else:
         print('换月检测: 未发现疑似换月失真')
 
+    # ---------------- v1.18 (L1): 昨结指纹（ref_prev / ref_prev_date）----------------
+    # 给每行写入「起始价口径合约的昨结算」+「该昨结的数据日期」。前端实时通道快照
+    # 的昨结（腾讯/新浪 f[7]，每 15 秒都在返回）与之比对：同交易日但不相等（>0.1%）
+    # = 实时口径 ≠ 起始价口径 = 换月拉锯脱节 → 页面「起始时间」列标「切月中」
+    #（前端 v2.22 配套）。轮次间隙（GitHub 丢任务 / 两轮之间）的口径振荡从此可见
+    # —— 2026-10-26 美豆粕事故的根治项。
+    # 锚定失败（contracts_now 无该品种，如夜盘 LME）或昨结缺失 → 不写字段，前端跳过。
+    # 口径对应关系：锚定合约 = 起始价口径合约（正常取价走主连分时表 = 锚定合约口径；
+    # 换月修正 / v1.17 续存后 close 也是锚定合约口径；L2 去抖回滚旧锚后同理，自洽）。
+    _ref_prev_n = 0
+    for row in rows:
+        code = row.get('code')
+        if not code or not code.startswith('hf_'):
+            continue
+        sym = code[3:]
+        _info18 = contracts_now.get(sym)
+        if not _info18:
+            continue
+        _ps18 = _info18.get('prev_settle')
+        if _ps18 and _ps18 > 0:
+            row['ref_prev'] = _ps18
+            _ref_prev_n += 1
+        if _info18.get('date'):
+            row['ref_prev_date'] = _info18['date']
+    print(f'昨结指纹: {_ref_prev_n} 行写入 ref_prev')
+
     em_ok = em_snap_ok and kline_fail < 3
     mode_title = {'day': '对比15:00涨跌统计（日间）',
                   'm1015': '对比10:15涨跌统计',
@@ -1818,7 +1912,7 @@ def main():
         'ref_desc': ref_desc,
         # v2.16.1: 前端版本号 —— 页面拿它和自己内置的 UI_VER 比对，
         # 不一致就自动重载（解决"页面常驻打开时旧 JS 永远不更新"的问题）
-        'ui': '2.21',
+        'ui': '2.22',
         'em_ok': em_ok,
         'sina_ok': sina_ok,
         'kline_fail': kline_fail,
