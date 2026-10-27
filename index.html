@@ -161,7 +161,7 @@
   </div>
   <div class="tip">实时最新价 · 新浪/腾讯双通道每 15 秒刷新 · 起始价按节点定时更新</div>
   <div class="tip">双绿灯，全部品种均为实时；红灯异常时，部分品种降级为延时</div>
-  <div class="tip" id="tipMark">「起始时间」列 = 该品种实际取到那一笔价的时刻（成交稀疏的品种会比整点早或晚几分钟，属正常）·只有"这行的价确实是旧时刻的"才标出时刻（如「分时 14:11」）·三条实时路都没拿到时标「缓存」·「切月中」= 实时通道口径与起始价口径不一致（主力合约换月拉锯中），该行涨跌幅是混口径、暂不可信，下一轮云端重锚自愈</div>
+  <div class="tip" id="tipMark">「起始时间」列 = 该品种实际取到那一笔价的时刻（成交稀疏的品种会比整点早或晚几分钟，属正常）·只有"这行的价确实是旧时刻的"才标出时刻（如「分时 14:11」）·三条实时路都没拿到时标「缓存」·「切月中」= 经主连/锚合约昨结交叉验证确认实时口径与起始价口径不一致（主力合约换月拉锯中），该行涨跌幅是混口径、暂不可信，下一轮云端重锚自愈</div>
 </div>
 
 <script>
@@ -232,7 +232,10 @@ var IDX_NAMES = { '标准普尔':1, '道琼工业':1, '纳斯达克':1, '富时A
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.22';      /* v2.22: 昨结指纹「切月中」标记（换月拉锯脱节 15 秒内可见，配合 fetch.py v1.18 的 ref_prev/ref_prev_date 行字段）；
+var UI_VER = '2.23';      /* v2.23: 「切月中」升级两层判定 —— 第一层指纹差异触发后，经中转同请求拉「主连+锚合约」
+                             两组昨结交叉验证（同源同刻）：相等=结算翻页假阳性静默，不等=真口径切换才亮（治 v2.22
+                             每日结算翻页误报，10-27 实测 NG +0.228% / CT 1.42% 两例；配合 fetch.py v1.19 的
+                             ref_contract 行字段）；证据缺失时回退第一层判定（保守亮标）；
                              与 fetch.py 写入 data.json 的 ui 字段对齐；
                              不一致时页面自动重载拿新 HTML（见 loadJson 的版本自检） */
 var CACHE_KEY = 'waiPanPageCacheV1';
@@ -264,6 +267,10 @@ var SINA_PROXIES = [
 ];
 var SINA_TRY_TIMEOUT = 4000;   /* 单个中转通道的超时（毫秒）；超时即切下一通道 */
 var SINA_MS = 15000;      /* 准实时刷新间隔（毫秒），与腾讯通道同节奏 */
+/* v2.23: 锚合约昨结通道（「切月中」第二层验证专用）—— 拉全部 hf_ 品种主连 + 云端锚合约
+   两组昨结，昨结是日内常数、60 秒粒度足够；10 分钟未刷到视为过期，回退第一层判定 */
+var ANCHOR_MS = 60000;        /* 锚昨结刷新间隔（毫秒） */
+var ANCHOR_STALE_MS = 600000; /* 锚昨结过期阈值（毫秒） */
 /* 走新浪通道升级为准实时的 6 个品种；其余品种腾讯直连已是实时，不必绕行 */
 var SINA_SYMS = { 'hf_RS':1, 'hf_CT':1, 'hf_FCPO':1, 'hf_FEF':1, 'hf_RSS3':1, 'hf_HO':1, 'hf_CHA50CFD':1 };
 
@@ -608,7 +615,19 @@ function baseQuoteOf(r){
    = 换月拉锯期主连在两合约间振荡 —— 锚定法只按轮次跑、轮次间隙没人盯的盲区
    （2026-10-26 美豆粕事故：19:30 轮被 GitHub 丢弃，16:08~23:01 之间口径摆回旧约
    无人发现，页面涨跌幅混口径失真 +0.31%、方向反），从此前端 15 秒内自见。
-   触发时「起始时间」列标「切月中」，该行涨跌幅是混口径、暂不可信。 */
+   触发时「起始时间」列标「切月中」，该行涨跌幅是混口径、暂不可信。
+   ---------- v2.23: 第二层锚合约交叉验证（治每日结算翻页假阳性） ----------
+   v2.22 实测破绽：「昨结是盘中常数」只在单交易日内成立。每日结算翻页窗口
+   （CME ≈ 北京 06:00 Globex 重开、ICE ≈ 08:00-09:00 电子盘开盘后）昨结本身翻新，
+   幅度 = 相邻两结算价差 = 真实行情量级（10-27 实测 NG +0.228% / CT 1.42%），第一层
+   必触发 —— 但口径其实一致、涨跌幅全程干净（两例误报实锤）。date 防线拦不住：
+   新浪 date 字段先于昨结值刷新。
+   修法：第一层差异触发后，取 state.ap 里「同一请求拉到的新浪主连昨结 + 锚合约昨结」
+   （refreshAnchor 60 秒粒度，同源同刻 → 结算翻页绝对同步）比对：
+     · 两者相等（≤0.1%）→ 口径一致，昨结翻页假阳性 → 静默不亮
+     · 两者不等（>0.1%）→ 主连口径真的摆离锚合约 → 亮「切月中」
+     · 第二层证据缺失（中转失败 / ap 过期 / 锚合约快照空壳 / 云端未写 ref_contract）
+       → 回退第一层判定（保守亮标，宁可误报不可漏报） */
 function prevFingerprintMark(r){
   if(!r || r.ref_prev == null || !(r.ref_prev > 0)) return null;
   var sc = sinaCodeOf(r), q = null;
@@ -623,6 +642,23 @@ function prevFingerprintMark(r){
   if(q.prevDate && r.ref_prev_date && q.prevDate !== r.ref_prev_date) return null;
   var gap = Math.abs(q.prev - r.ref_prev) / r.ref_prev;
   if(gap <= 0.001) return null;   /* 昨结差 <0.1% 的口径混淆，涨跌幅失真同样 <0.1%，无害不打扰 */
+  /* ---------- v2.23 第二层：锚合约昨结交叉验证 ---------- */
+  if(r.ref_contract && state.ap && state.apTs &&
+     (Date.now() - state.apTs) < ANCHOR_STALE_MS){
+    var apA = state.ap['hf_' + r.ref_contract];          /* 锚合约昨结（起始价口径） */
+    var apM = (sc && sc.indexOf('hf_') === 0) ? state.ap[sc] : null;   /* 新浪主连昨结 */
+    if(apA && apM && apA.prev > 0 && apM.prev > 0){
+      var gap2 = Math.abs(apM.prev - apA.prev) / apA.prev;
+      if(gap2 <= 0.001) return null;   /* 口径其实一致（结算翻页假阳性）→ 不亮，静默自愈 */
+      return { mark: '切月中',
+               markTip: '实时主连昨结 ' + q.prev + ' 与起始价口径昨结 ' + r.ref_prev +
+                        '（差 ' + (gap * 100).toFixed(2) + '%）；第二层验证：主连昨结 ' +
+                        apM.prev + ' ≠ 锚合约 ' + r.ref_contract + ' 昨结 ' + apA.prev +
+                        '（差 ' + (gap2 * 100).toFixed(2) + '%）—— 主力合约换月拉锯中，' +
+                        '实时价与起始价不同口径，本行涨跌幅暂不可信，等下一轮云端重锚自愈' };
+    }
+  }
+  /* 第二层证据缺失 → 回退第一层判定（保守亮标，宁可误报不可漏报） */
   return { mark: '切月中',
            markTip: '实时通道昨结 ' + q.prev + ' 与起始价口径昨结 ' + r.ref_prev +
                     '（差 ' + (gap * 100).toFixed(2) + '%）—— 主力合约换月拉锯中，' +
@@ -798,10 +834,11 @@ function mlNote(){
 /* ---------- 状态 ---------- */
 var state = { data:null, tx:null, txTime:'', txDate:'', txFail:0, sn:{}, snTime:'', snDate:'', snFail:0, gq:{},
               ml:{}, mlOn:false, mlFirst:false, mlFail:0, mlOk:0,
+              ap:null, apTs:0,          /* v2.23: 锚昨结缓存（code→{prev,prevDate}）+ 拉取时刻 */
               sse:null, sseLive:null, sseTryAt:0, sseErr:'' };
-var txBusy = false, jsonBusy = false, gqBusy = false, snBusy = false;
+var txBusy = false, jsonBusy = false, gqBusy = false, snBusy = false, apBusy = false;
 var sseBaseBusy = false, sseLiveBusy = false, sseActive = false;
-var fastTimer = null, jsonTimer = null, gqTimer = null, snTimer = null, sseTimer = null;
+var fastTimer = null, jsonTimer = null, gqTimer = null, snTimer = null, sseTimer = null, apTimer = null;
 
 function rowCode(r){
   if(!r) return null;
@@ -1272,6 +1309,61 @@ function scheduleSina(){
     refreshSina().then(scheduleSina);
   }, SINA_MS);
 }
+/* ---------- v2.23: 锚合约昨结通道 —— 「切月中」第二层验证的数据源（60 秒粒度） ---------- */
+/* 同一请求里拉「全部 hf_ 品种主连 + 云端锚合约」两组昨结（经 Cloudflare 双通道中转，
+   复用 refreshSina 的 fetchSinaOnce）。关键设计：主连与锚合约必须在【同一个请求】里
+   —— 同源同刻，结算翻页窗口内两者绝对同翻，第二层比对才免疫翻页不同步噪声。
+   昨结是日内常数，60 秒足够；只用于指纹判定，不参与行显示（显示通道照旧）。 */
+async function refreshAnchor(){
+  if(apBusy) return;
+  if(!state.data || !state.data.rows) return;
+  var need = [], seen = {};
+  for(var i=0;i<state.data.rows.length;i++){
+    var r = state.data.rows[i];
+    var c = sinaCodeOf(r);
+    if(c && c.indexOf('hf_') === 0 && !seen[c]){ seen[c] = 1; need.push(c); }   /* 主连 */
+    var ac = r.ref_contract;   /* v1.19 行字段：锚合约代码（如 NG2701）；旧版 data.json 无此字段 */
+    if(ac){
+      var a = 'hf_' + ac;
+      if(!seen[a]){ seen[a] = 1; need.push(a); }                                /* 锚合约 */
+    }
+  }
+  if(!need.length) return;
+  apBusy = true;
+  try{
+    var text = null;
+    for(var pi=0; pi<SINA_PROXIES.length; pi++){
+      try{ text = await fetchSinaOnce(SINA_PROXIES[pi], need.join(',')); break; }
+      catch(e){ text = null; }
+    }
+    if(text == null) throw new Error('all proxies failed');
+    var re = /hq_str_(hf_\w+)="([^"]*)"/g, m;
+    var ap = {};
+    while((m = re.exec(text))){
+      var code = m[1], fb = m[2].split(',');
+      if(fb.length > 12 && fb[0]){
+        var pv = parseFloat(fb[7]);          /* f[7]=昨结算（与主连快照同字段位） */
+        if(isNaN(pv) || pv <= 0) continue;   /* 空壳合约（已到期）无昨结 → 缺失即回退 */
+        if(/^hf_HG(\d|$)/.test(code)) pv = pv / 100;   /* 美铜昨结为美分口径（主连与月份合约同换算） */
+        ap[code] = { prev: pv, prevDate: fb[12] || '' };
+      }
+    }
+    if(!Object.keys(ap).length) throw new Error('empty');
+    state.ap = ap;
+    state.apTs = Date.now();
+    render();   /* 第二层证据到位：此前被第一层误标的行此轮静默解锁 */
+  }catch(e){
+    /* 静默：保留上一轮 ap（昨结日内常数，旧值仍有效）；连续失败超 10 分钟由 apTs 过期回退 */
+  }finally{
+    apBusy = false;
+  }
+}
+function scheduleAnchor(){
+  clearTimeout(apTimer);
+  apTimer = setTimeout(function(){
+    refreshAnchor().then(scheduleAnchor);
+  }, ANCHOR_MS);
+}
 /* ---------- TradingView：延时品种最新价（打开即拉 + 每分钟刷新）---------- */
 async function refreshGlobal(){
   if(gqBusy) return;
@@ -1327,6 +1419,8 @@ async function boot(){
   scheduleProbe();                 /* ⑫ v2.10: 之后每 60 秒检查一次是否需要补档 */
   mlTick();                        /* ⑬ v2.11: 新浪快照通道异常时，用分时表接管那 6 个品种 */
   scheduleMl();                    /* ⑭ v2.11: 之后每 15 秒检查一次 */
+  refreshAnchor();                 /* ⑮ v2.23: 锚昨结（「切月中」第二层验证数据源，立即拉一次） */
+  scheduleAnchor();                /* ⑯ v2.23: 之后每 60 秒刷一次 */
 }
 boot();
 jsonTimer = setInterval(loadJson, JSON_MS);   /* 每 60 秒检查一遍起始价是否更新 */
@@ -1348,6 +1442,7 @@ document.addEventListener('visibilitychange', function(){
     clearTimeout(sseTimer); sseTimer = null;
     clearTimeout(probeTimer); probeTimer = null;
     clearTimeout(mlTimer); mlTimer = null;
+    clearTimeout(apTimer); apTimer = null;   /* v2.23 */
   }else{
     loadJson();
     refreshTx();
@@ -1356,11 +1451,13 @@ document.addEventListener('visibilitychange', function(){
     sseTick();
     probeTick();
     mlTick();
+    refreshAnchor();   /* v2.23: 切回前台立即补一次（后台暂停期间可能错过翻页刷新） */
     scheduleFast();
     scheduleSina();
     scheduleSse();
     scheduleProbe();
     scheduleMl();
+    scheduleAnchor();
     if(!jsonTimer) jsonTimer = setInterval(loadJson, JSON_MS);
   }
 });
