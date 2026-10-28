@@ -1,7 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.19）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.20）
 ======================================================
+  - 换月标签形态统一（v1.20，2026-10-28 用户要求）：
+      · 「起始时间」列的换月提示从【整列「换月」大字】改为【主文字显示基准真身
+        （昨结）+ 前端「换月」小标】，与「切月中」小标同款样式 ——
+        主文字永远回答"基准是什么"（时间 / 昨结），小标永远回答"状态是什么"
+        （换月=口径已修正、可信；切月中=口径混着、暂不可信）。
+      · 语义分工：v1.15.1 起「换月」二字整列显示，但没说基准是昨结；统一后
+        「昨结 [换月]」自解释。穿越成功行维持原时点 + 前端也亮「换月」小标
+        （roll='fix' 行统一亮标，此前穿越成功行无任何提示）。
+      · 改动点：ref='换月' → ref='昨结'（锚定法穿越失败 / v1.17 自检 / 旧通道
+        三处）；过渡继承与续存继承两处把旧版 '换月' 值平滑迁移为 '昨结'。
+        前端配套见 index.html v2.24（含对旧 data.json 里 ref='换月' 行的兼容显示）。
   - 「切月中」假阳性根治（v1.19，2026-10-27 结算翻页误报事故）：
       · 事故：v1.18 的 L1 昨结指纹假设「昨结是盘中常数」，只在单交易日内成立。
         每日结算翻页窗口（CME 北京约 06:00 Globex 重开、ICE 约 08:00-09:00 电子盘
@@ -1542,6 +1553,8 @@ def main():
             p = prev_special[row['name']]
             if p is not None:
                 row['ref'] = p.get('ref')
+                if row['ref'] == '换月':
+                    row['ref'] = '昨结'   # v1.20: 旧版「换月」大字行平滑迁移到新形态（主文字=昨结）
         if p is None:
             continue
         row['close'] = p['close']
@@ -1654,7 +1667,7 @@ def main():
                 continue
             row['roll_src'] = row.get('ref')   # v1.17: 记下原参考时点，供跨轮续存匹配
             row['close'] = ps
-            row['ref'] = '换月'
+            row['ref'] = '昨结'   # v1.20: 主文字=基准真身（昨结），「换月」降为前端小标（index v2.24 配套）
             row['note'] = '换月'
             row['roll'] = 'fix'
             row['ref_actual'] = None
@@ -1711,6 +1724,8 @@ def main():
         if p17 is not None and prev_contracts.get(sym) == info['contract']:
             row['close'] = p17['close']
             row['ref'] = p17.get('ref')
+            if row['ref'] == '换月':
+                row['ref'] = '昨结'   # v1.20: 旧版「换月」大字行平滑迁移到新形态（主文字=昨结）
             row['ref_actual'] = p17.get('ref_actual')
             row['gap_min'] = p17.get('gap_min')
             row['roll_src'] = p17.get('roll_src')
@@ -1783,7 +1798,7 @@ def main():
                 print(f'换月自检跳过(无昨结): {row["name"]}')
                 continue               # 无昨结可用：放弃修正，维持原值
             row['close'] = ps17
-            row['ref'] = '换月'
+            row['ref'] = '昨结'   # v1.20: 主文字=基准真身（昨结），「换月」降为前端小标（index v2.24 配套）
             row['ref_actual'] = None
             row['gap_min'] = None
         row['note'] = '换月'
@@ -1871,7 +1886,8 @@ def main():
             continue
         close = row['close']
         row['close'] = ps
-        row['ref'] = '换月'   # v1.15.1: 用户要求——「起始时间」列只显示"换月"两个字
+        row['ref'] = '昨结'   # v1.20: 主文字=基准真身（昨结），「换月」降为前端小标（index v2.24 配套；
+                              #   v1.15.1 曾要求整列只显示"换月"二字，v1.20 起由小标承担提示职责）
         row['note'] = '换月'
         row['ref_actual'] = None   # v1.10: "昨结算"不对应任何一笔分时，说明字段置空
         row['gap_min'] = None
@@ -1927,7 +1943,7 @@ def main():
         'ref_desc': ref_desc,
         # v2.16.1: 前端版本号 —— 页面拿它和自己内置的 UI_VER 比对，
         # 不一致就自动重载（解决"页面常驻打开时旧 JS 永远不更新"的问题）
-        'ui': '2.23',
+        'ui': '2.24',
         'em_ok': em_ok,
         'sina_ok': sina_ok,
         'kline_fail': kline_fail,
