@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.20）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.21）
 ======================================================
+  - 换月误报根治（v1.21，2026-10-30 原糖闪标 / 伦铅长亮 / 铁矿反复换月）：
+      · _snap_gap_min 改用完整日期时刻的绝对差，删除 24 小时环绕：旧算法会把
+        数日前的僵尸合约算成负分钟、把跨日近一天算成几分钟，新鲜度闸门因此失效。
+      · 强判据不再「首个命中即停」：强、弱候选都按价格差、昨结差、成交量是否一致、
+        时间差择优，近似近月不能抢在字段完全相同的真主力前面（铁矿 2611/2612 实录）。
+      · 快照补成交量指纹；美铜月份合约与主连统一美分→美元，修掉单位不一致导致的不锚定。
+      · 前端 v2.25 配套：「切月中」只由同源同请求的主连/锚合约证据确认，缺证据不猜。
   - 换月标签形态统一（v1.20，2026-10-28 用户要求）：
       · 「起始时间」列的换月提示从【整列「换月」大字】改为【主文字显示基准真身
         （昨结）+ 前端「换月」小标】，与「切月中」小标同款样式 ——
@@ -376,12 +383,17 @@ def sina_snapshot(codes):
                 prev = float(f[7]) if f[7] else None
             except ValueError:
                 prev = None
+            try:
+                volume = float(f[9]) if f[9] else None   # f[9]=成交量，主力身份辅助指纹
+            except ValueError:
+                volume = None
             last = float(f[0])
-            if code in SINA_CENT_TO_DOLLAR:
+            # v1.21: 主连 hf_HG 与月份合约 hf_HG2612 都是美分/磅，必须同尺度归一。
+            if code in SINA_CENT_TO_DOLLAR or re.fullmatch(r'hf_HG\d{4}', code):
                 last /= 100.0
                 if prev is not None:
                     prev /= 100.0
-            out[code] = {'last': last, 'prev_settle': prev,
+            out[code] = {'last': last, 'prev_settle': prev, 'volume': volume,
                          'time': f[6], 'date': f[12]}
     return out
 
@@ -591,14 +603,17 @@ def rollover_suspect_close(bars, close, ps, exclude=False,
     return None, None, ''
 
 def _snap_gap_min(a, b):
-    """v1.16.3: 两个快照时刻相差几分钟（处理跨午夜；解析失败返回 None）。"""
+    """两个完整快照时刻的绝对差（分钟）；解析失败返回 None。
+
+    v1.21：日期已参与构造 datetime，不能再做 24 小时环绕。旧写法在间隔超过
+    一天时会产生负数，在接近一天时会把旧报价折成几分钟，僵尸闸门随之失效。
+    """
     try:
         da = datetime.strptime(a['date'] + ' ' + a['time'], '%Y-%m-%d %H:%M:%S')
         db = datetime.strptime(b['date'] + ' ' + b['time'], '%Y-%m-%d %H:%M:%S')
     except Exception:
         return None
-    gap = abs((da - db).total_seconds())
-    return min(gap, 86400 - gap) / 60.0
+    return abs((da - db).total_seconds()) / 60.0
 
 
 def sina_active_contracts(sina_map, now):
@@ -607,9 +622,13 @@ def sina_active_contracts(sina_map, now):
     原理（物理必然）：主连 hf_XXX 的行情流就是当前主力合约的行情流，
     所以必然存在某个月份合约 hf_XXXYYMM 与主连【同一秒、同一价】。
     判据分级：
-      · 强判据：快照时间戳相差 <= 3 秒 且 价差 <= 0.3% → 直接认定；
-      · 弱判据：价差 <= 0.2% 的【最小者】（收盘静止期时间戳各自停在不同时刻时用），
-        且与主连时间差 <= 2 分钟。
+      · 强判据：快照日期相同、时间戳相差 <= 3 秒且价差 <= 0.3%；
+      · 弱判据：价差 <= 0.2%，且与主连时间差 <= 2 分钟（收盘静止期兜底）。
+      · 两级都取证据评分最优者，不再先到先得；完整时间差 >20 分钟或无法解析即排除。
+    v1.21 修误判（2026-10-30 铁矿 2611/2612 同刻近价、伦铅僵尸合约）：
+      · 强判据也遍历全部候选，按价差 / 昨结差 / 成交量 / 时间差择优；
+      · 完整日期时刻直接取绝对差，禁止超过一天后环绕成负数或几分钟；
+      · 月份合约美铜同步归一单位，成交量加入身份辅助指纹。
     v1.16.3 修误判（2026-10-19 美黄金 GC2612 被判成 GC2610）：
       · 新增新鲜度闸门——报价时刻落后主连 > 20 分钟的合约是"僵尸报价"
         （GC2610 停在 19:14、主连已 20:24，价差 0.25% 恰好落在弱判据区间），
@@ -641,33 +660,45 @@ def sina_active_contracts(sina_map, now):
             cands = sina_snapshot(cand_codes)
         except Exception:
             continue
-        cent = ('hf_' + sym) in SINA_CENT_TO_DOLLAR   # 美铜：候选合约同样是美分，比较前换算
-        best_weak = None                 # (gap, code) —— 取价差最小者，而非第一个命中者
-        found = None
+        # v1.21: sina_snapshot 已把主连和月份合约归一到同一价格单位，这里不得再除 100。
+        # 强、弱候选都遍历完后择优；评分先看价差，再看昨结差、成交量指纹和时间差。
+        # 不能只取第一个强命中：铁矿 2611/2612 会同刻近价，2611 排前但不是主连真身。
+        best_strong = None             # (gap, prev_gap, volume_mismatch, lag, code)
+        best_weak = None
+        mlast = main_q['last']
+        mprev = main_q.get('prev_settle')
+        mvolume = main_q.get('volume')
         for cc in cand_codes:
             q = cands.get(cc)
             if not q or not q.get('last'):
                 continue
-            qlast = q['last'] / 100.0 if cent else q['last']
-            mlast = main_q['last'] / 100.0 if cent else main_q['last']
+            qlast = q['last']
             gap = abs(qlast - mlast) / mlast if mlast else 1.0
             lag = _snap_gap_min(q, main_q)
-            if lag is not None and lag > 20:
-                continue                   # 僵尸报价：与主连脱节太久，不参与锚定
-            if q.get('date') == main_q.get('date') and gap <= 0.003 \
-                    and (lag is None or lag * 60 <= 3):
-                found = cc                     # 同价且同刻（容 3 秒）= 铁证
-                break
-            if gap <= 0.002 and (lag is None or lag <= 2) \
-                    and (best_weak is None or gap < best_weak[0]):
-                best_weak = (gap, cc)
-        if found is None and best_weak:
-            found = best_weak[1]
+            if lag is None or lag > 20:
+                continue               # 时间不可核验或确属僵尸报价：不参与锚定
+            qprev = q.get('prev_settle')
+            prev_gap = (abs(qprev - mprev) / abs(mprev)
+                        if qprev is not None and mprev else 1.0)
+            qvolume = q.get('volume')
+            volume_mismatch = (0 if qvolume is not None and mvolume is not None
+                               and qvolume == mvolume else 1)
+            score = (gap, prev_gap, volume_mismatch, lag, cc)
+            if q.get('date') == main_q.get('date') and gap <= 0.003 and lag * 60 <= 3:
+                if best_strong is None or score < best_strong:
+                    best_strong = score
+            elif gap <= 0.002 and lag <= 2:
+                if best_weak is None or score < best_weak:
+                    best_weak = score
+        if best_strong:
+            found = best_strong[4]
+        elif best_weak:
+            found = best_weak[4]
+        else:
+            found = None
         if found:
             q = cands[found]
             ps = q.get('prev_settle')
-            if ps is not None and cent:
-                ps /= 100.0
             # v1.18: date = 主连快照的数据日期（f[12]），供前端昨结指纹做"同交易日"校验
             #（跨结算更新窗口昨结会变，不同日不比对，防误报）。
             out[sym] = {'contract': found[3:], 'prev_settle': ps,
@@ -1943,7 +1974,7 @@ def main():
         'ref_desc': ref_desc,
         # v2.16.1: 前端版本号 —— 页面拿它和自己内置的 UI_VER 比对，
         # 不一致就自动重载（解决"页面常驻打开时旧 JS 永远不更新"的问题）
-        'ui': '2.24',
+        'ui': '2.25',
         'em_ok': em_ok,
         'sina_ok': sina_ok,
         'kline_fail': kline_fail,
