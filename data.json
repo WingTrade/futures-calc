@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-10-31 16:05",
+ "generated_at": "2026-10-31 20:01",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
@@ -7,7 +7,7 @@
  "ui": "2.25",
  "em_ok": false,
  "sina_ok": true,
- "kline_fail": 23,
+ "kline_fail": 19,
  "contracts": {
   "CL": "CL2612",
   "OIL": "OIL2701",
@@ -318,7 +318,7 @@
    "chg": 0.04299999999999926,
    "pct": 0.22269408048060108,
    "flag": false,
-   "note": "继",
+   "note": "",
    "code": "hf_RS",
    "ref": "10-30 23:00",
    "ref_actual": "10-30 23:00",
@@ -334,7 +334,7 @@
    "chg": -0.2530000000000001,
    "pct": -0.3237695477464106,
    "flag": false,
-   "note": "继",
+   "note": "",
    "code": "hf_CT",
    "ref": "10-30 23:00",
    "ref_actual": "10-30 23:00",
