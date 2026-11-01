@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-11-01 19:59",
+ "generated_at": "2026-11-01 23:01",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
@@ -7,7 +7,7 @@
  "ui": "2.25",
  "em_ok": false,
  "sina_ok": true,
- "kline_fail": 7,
+ "kline_fail": 20,
  "contracts": {
   "CL": "CL2612",
   "OIL": "OIL2701",
@@ -366,11 +366,11 @@
    "chg": 0.12700000000000955,
    "pct": 0.13966173268525475,
    "flag": false,
-   "note": "",
+   "note": "继",
    "code": "hf_FEF",
    "ref": "10-30 23:00",
-   "ref_actual": "10-30 23:00",
-   "gap_min": 0,
+   "ref_actual": null,
+   "gap_min": null,
    "ref_prev": 90.77,
    "ref_prev_date": "2026-10-31",
    "ref_contract": "FEF2612"
