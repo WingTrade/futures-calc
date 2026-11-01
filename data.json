@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-11-02 02:31",
+ "generated_at": "2026-11-02 05:18",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
@@ -7,7 +7,7 @@
  "ui": "2.25",
  "em_ok": false,
  "sina_ok": true,
- "kline_fail": 23,
+ "kline_fail": 20,
  "contracts": {
   "CL": "CL2612",
   "OIL": "OIL2701",
@@ -266,9 +266,9 @@
   {
    "name": "美大豆",
    "close": 1235.025,
-   "last": 1233.642,
-   "chg": -1.3830000000000382,
-   "pct": -0.11198153883524933,
+   "last": 1233.643,
+   "chg": -1.3820000000000618,
+   "pct": -0.11190056881440145,
    "flag": false,
    "note": "",
    "code": "hf_S",
@@ -346,17 +346,17 @@
   {
    "name": "马棕油",
    "close": 4682.88,
-   "last": 4682.88,
-   "chg": 0.0,
-   "pct": 0.0,
+   "last": 4683.1,
+   "chg": 0.22000000000025466,
+   "pct": 0.004697963646308568,
    "flag": false,
-   "note": "",
+   "note": "继",
    "code": "hf_FCPO",
    "ref": "10-30 23:00",
    "ref_actual": "10-30 17:59",
    "gap_min": 301,
-   "ref_prev": 4616.0,
-   "ref_prev_date": "2026-10-30",
+   "ref_prev": 4681.0,
+   "ref_prev_date": "2026-11-02",
    "ref_contract": "FCPO2701"
   },
   {
