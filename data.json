@@ -13,7 +13,7 @@
   "OIL": "OIL2701",
   "BO": "BO2612",
   "CT": "CT2612",
-  "FCPO": "FCPO2702",
+  "FCPO": "FCPO2701",
   "FEF": "FEF2612",
   "GC": "GC2612",
   "HO": "HO2612",
@@ -322,10 +322,7 @@
    "code": "hf_FCPO",
    "ref": "11-02 15:00",
    "ref_actual": "11-02 14:54",
-   "gap_min": 6,
-   "ref_prev": 4761.0,
-   "ref_prev_date": "2026-11-02",
-   "ref_contract": "FCPO2702"
+   "gap_min": 6
   },
   {
    "name": "新加坡铁矿石",
