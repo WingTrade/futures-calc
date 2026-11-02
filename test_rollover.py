@@ -91,6 +91,38 @@ class ActiveContractTests(unittest.TestCase):
         result = self.identify(main, candidates)
         self.assertEqual(result['FEF']['contract'], 'FEF2612')
 
+    def test_fcpo_close_snapshot_near_price_is_not_contract_identity(self):
+        """2026-11-02 收盘实录：2702 近价，但昨结和成交量都与主连不同。"""
+        main = quote(4724.55, prev_settle=4748.0, volume=19444.0,
+                     time='17:59:47', date='2026-11-02')
+        candidates = {
+            'hf_FCPO2701': quote(4648.80, prev_settle=4681.0, volume=91257.0,
+                                 time='17:59:59', date='2026-11-02'),
+            'hf_FCPO2702': quote(4732.24, prev_settle=4761.0, volume=35386.0,
+                                 time='17:59:55', date='2026-11-02'),
+            'hf_FCPO2703': quote(4800.72, prev_settle=4826.0, volume=39734.0,
+                                 time='17:59:59', date='2026-11-02'),
+        }
+        self.assertEqual(self.identify(main, candidates), {},
+                         '价差 0.163% 不能越过昨结、成交量双冲突单独认锚')
+
+    def test_near_price_without_independent_fingerprint_never_anchors(self):
+        main = quote(800.0, prev_settle=790.0, volume=12345.0)
+        for name, candidate in [
+            ('强判据时间命中', quote(800.8, prev_settle=789.0, volume=100.0)),
+            ('弱判据时间命中', quote(800.8, prev_settle=789.0, volume=100.0,
+                                   time='19:59:30')),
+        ]:
+            with self.subTest(name=name):
+                self.assertEqual(self.identify(main, {'hf_FEF2612': candidate}), {})
+
+    def test_weak_anchor_accepts_volume_as_independent_fingerprint(self):
+        main = quote(800.0, prev_settle=790.0, volume=12345.0)
+        candidate = quote(800.8, prev_settle=789.0, volume=12345.0,
+                          time='19:59:30')
+        result = self.identify(main, {'hf_FEF2612': candidate})
+        self.assertEqual(result['FEF']['contract'], 'FEF2612')
+
     def test_stale_and_unverifiable_candidates_never_anchor(self):
         main = quote(800.0)
         cases = [
