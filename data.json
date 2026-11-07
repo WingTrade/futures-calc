@@ -1,13 +1,13 @@
 {
- "generated_at": "2026-11-07 10:57",
+ "generated_at": "2026-11-07 11:31",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
  "ref_desc": "参考(有色01:00/贵金属02:30/其他23:00): 23:00→11-06 23:00  01:00→11-07 01:00  02:30→11-07 02:30",
  "ui": "2.25",
- "em_ok": false,
+ "em_ok": true,
  "sina_ok": true,
- "kline_fail": 23,
+ "kline_fail": 0,
  "contracts": {
   "CL": "CL2612",
   "OIL": "OIL2701",
