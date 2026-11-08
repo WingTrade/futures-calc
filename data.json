@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-11-09 02:31",
+ "generated_at": "2026-11-09 05:19",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
@@ -345,18 +345,18 @@
   },
   {
    "name": "马棕油",
-   "close": 4257.8,
+   "close": 4258.0,
    "last": 4257.8,
-   "chg": 0.0,
-   "pct": 0.0,
+   "chg": -0.1999999999998181,
+   "pct": -0.004697040864251247,
    "flag": false,
    "note": "",
    "code": "hf_FCPO",
    "ref": "11-06 23:00",
-   "ref_actual": "11-06 17:59",
-   "gap_min": 301,
-   "ref_prev": 4377.0,
-   "ref_prev_date": "2026-11-06",
+   "ref_actual": "11-06 18:00",
+   "gap_min": 300,
+   "ref_prev": 4258.0,
+   "ref_prev_date": "2026-11-09",
    "ref_contract": "FCPO2701"
   },
   {
