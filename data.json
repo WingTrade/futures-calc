@@ -1,5 +1,5 @@
 {
- "generated_at": "2026-11-16 03:53",
+ "generated_at": "2026-11-16 05:07",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
@@ -24,7 +24,7 @@
   "SI": "SI2612",
   "CAD": "CAD2611",
   "CHA50CFD": "CHA50CFD2611",
-  "SM": "SM2612",
+  "SM": "SM2701",
   "HG": "HG2703"
  },
  "rows": [
@@ -283,19 +283,20 @@
   },
   {
    "name": "美豆粕",
-   "close": 331.611,
-   "last": 330.35,
-   "chg": -1.2609999999999673,
-   "pct": -0.3802648283681685,
+   "close": 329.122,
+   "last": 328.053,
+   "chg": -1.0690000000000168,
+   "pct": -0.3248035682816757,
    "flag": false,
-   "note": "",
+   "note": "换月",
    "code": "hf_SM",
    "ref": "11-13 23:00",
    "ref_actual": "11-13 23:00",
    "gap_min": 0,
-   "ref_prev": 325.4,
+   "roll": "fix",
+   "ref_prev": 323.6,
    "ref_prev_date": "2026-11-14",
-   "ref_contract": "SM2612"
+   "ref_contract": "SM2701"
   },
   {
    "name": "美豆油",
@@ -347,18 +348,18 @@
   },
   {
    "name": "马棕油",
-   "close": 4462.66,
-   "last": 4462.66,
-   "chg": 0.0,
-   "pct": 0.0,
+   "close": 4462.0,
+   "last": 4462.54,
+   "chg": 0.5399999999999636,
+   "pct": 0.012102196324517337,
    "flag": false,
    "note": "",
    "code": "hf_FCPO",
    "ref": "11-13 23:00",
-   "ref_actual": "11-13 17:59",
-   "gap_min": 301,
-   "ref_prev": 4440.0,
-   "ref_prev_date": "2026-11-13",
+   "ref_actual": "11-13 18:00",
+   "gap_min": 300,
+   "ref_prev": 4462.0,
+   "ref_prev_date": "2026-11-16",
    "ref_contract": "FCPO2701"
   },
   {
