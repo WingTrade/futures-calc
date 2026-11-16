@@ -1,7 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.22）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.23）
 ======================================================
+  - 美铜换月 -99% 单位混算根治（v1.23，2026-11-16 美铜事故）：
+      · 事故：美铜换月穿越取价时，新浪月份合约分时（HG2703）返回美分/磅，
+        未经换算直接写入起始价 618.873，对美元/磅最新价 6.17104 算出 -99.00%。
+      · 根因：主流程取价有美分→美元换算，但换月穿越路径（v1.16/v1.17）
+        调用 sina_minline_today 后漏了换算；污染值又经续接继承逐轮原样复制，永不自愈。
+      · 修复三处：① 换算收进 sina_minline_today 内部统一做（所有调用点同口径）；
+        ② v1.16 穿越路径补「偏差 >25% 放弃穿越退昨结」护栏（与 v1.17 自检同款）；
+        ③ 续接继承补美分口径去污（继承值偏离最新价 >25% 且 /100 后正常 → /100 纠正）。
+      · 同步治愈 data.json 污染行：close 618.873 → 6.18873，涨跌幅恢复 -0.29%。
   - 锚定误判修复（v1.22，2026-11-02 马棕油非换月日误标 FCPO2702）：
       · 价格接近、时间接近只说明「像」，不再足以认定主连与月份合约是同一条行情流。
       · 强、弱判据都增加独立指纹硬门槛：昨结相同或成交量指纹相同，至少满足一项；
@@ -502,6 +511,13 @@ def sina_minline_today(symbol):
         elif day and re.match(r'^\d{2}:\d{2}$', str(e[0])):
             hh, mm = int(e[0][:2]), int(e[0][3:5])
             out.append((datetime.strptime(day, '%Y-%m-%d').replace(hour=hh, minute=mm), p))
+    # v1.23: 新浪美铜分时（主连 HG 与月份合约 HGxxxx）单位是美分/磅，
+    # 而快照 / 东财是美元/磅。换算收进函数内部统一做，保证所有调用点
+    # （主流程取价 / v1.16 换月穿越 / v1.17 自检）拿到同一口径 ——
+    # 此前换算只在主流程做，换月穿越路径漏掉，把 618.873 美分当美元
+    # 对 6.17 美元算出 -99%。
+    if symbol == 'HG' or re.fullmatch(r'HG\d{4}', symbol):
+        out = [(t, p / 100.0) for t, p in out]
     out.sort(key=lambda x: x[0])
     return out
 
@@ -1225,8 +1241,9 @@ def main():
         print('主力锚定:', {s: i['contract'] for s, i in contracts_now.items()})
 
     # v1.1 新增：新浪"当日分时"（参考价主源）
-    #   按 symbol 去重拉取；美铜美分→美元换算；间隔 0.35s 温和请求
+    #   按 symbol 去重拉取；间隔 0.35s 温和请求
     #   （铁矿石有自己的 minline + 日K 兜底逻辑，此处跳过）
+    #   v1.23: 美铜美分→美元换算已收进 sina_minline_today 内部，此处不再换算
     ml_by_sym = {}
     ml_ok = 0
     skip_names = {'新加坡铁矿石'}
@@ -1238,8 +1255,6 @@ def main():
             continue
         try:
             bars = sina_minline_today(sym)
-            if sym == 'HG':
-                bars = [(t, p / 100.0) for t, p in bars]
             ml_by_sym[sym] = bars
             if bars:
                 ml_ok += 1
@@ -1608,6 +1623,15 @@ def main():
         row['gap_min'] = p.get('gap_min')
         if row['last'] is None:
             row['last'] = p.get('last')
+        # v1.23 续接去污：美分值未换算美元被继承（美铜事故：618.873 美分 → -99%）。
+        # 仅限美分口径品种（SINA_CENT_TO_DOLLAR）：继承的起始价偏离最新价超 25%、
+        # 且 /100 后偏差回到正常，判定为美分→美元漏换算，/100 纠正。
+        if row.get('code') in SINA_CENT_TO_DOLLAR and row['close'] is not None \
+                and row['last'] and row['last'] > 0 \
+                and abs(row['close'] - row['last']) / row['last'] > 0.25 \
+                and abs(row['close'] / 100.0 - row['last']) / row['last'] <= 0.25:
+            print(f"续接去污: {row['name']} 继承起始价 {row['close']} 为美分口径，纠正为 {row['close'] / 100.0:.5f}")
+            row['close'] = row['close'] / 100.0
         if p.get('roll') == 'fix':
             # v1.16: 换月修正行的继承要连"换月"身份一起继承 ——
             # 否则下一轮页面小标消失，且 close 仍是修正口径却没了说明
@@ -1696,6 +1720,14 @@ def main():
                         _bc, ref_dt, max_gap_hours=26, now=now, allow_stale=True)
                 except Exception:
                     new_close = None
+        # v1.23 护栏（与 v1.17 自检同款）：穿越价与最新价偏差 > 25% = 口径污染，
+        # 放弃穿越退昨结。美铜事故实录：美分值 618.873 未换算，对美元最新价
+        # 6.17 算出 -99%；正常换月两合约价差远小于 25%，此阈值不误伤真换月。
+        if new_close is not None and row['last'] is not None and row['last'] > 0 \
+                and abs(new_close - row['last']) / row['last'] > 0.25:
+            print(f'换月穿越护栏: {row["name"]} 穿越价 {new_close} 偏离最新价 '
+                  f'{row["last"]} 超 25%，疑口径污染，退昨结')
+            new_close = None
         if new_close is not None:
             # ① 穿越成功：参考价 = 新合约在原时点的真实价，ref 文本保持原时点
             row['close'] = new_close
