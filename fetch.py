@@ -1,7 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.23）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.24）
 ======================================================
+  - 美铜口径统一为【美分/磅】（v1.24，2026-11-16 用户要求）：
+      · 事故背景：网页主页美铜显示 6 块多（美元/磅），点进去的新浪 K 线页显示 600 多
+        （美分/磅），同一品种两个数，用户核对时无法对上。
+      · 决策：全链路统一美分/磅（对齐 K 线页与国内行情软件）；K 线页保持新浪原版不改。
+      · 各源实测单位（2026-11-16 12:39）：
+          新浪快照 hf_HG / 月份合约 → 美分（610.87）⇒ 原值直用（删 v1.21 的 ÷100）
+          新浪分时 minLine           → 美分（610.883）⇒ 原值直用（删 v1.23 的 ÷100）
+          新浪日K                    → 美分（610.950）⇒ 本来就是美分，自检不再换算
+          腾讯 qt.gtimg.cn           → 美分（610.87）⇒ 前端原值直用（删 5 处 ÷100）
+          东财快照 101.HG00Y / 5分钟K → 美元（6.0135）⇒ 入口 ×100 转美分（EM_CENT_SECIDS）
+      · 口径迁移：续接继承的旧美元值（6.18）与新一轮美分值（610.8）偏离 >25%，
+        ×100 后回到正常 → 自动迁移；反向（÷100）也保留兜底，将来口径再反转同样兜得住。
+      · 比例类阈值（25% 护栏、2% 日K区间容差）不受单位影响。
   - 美铜换月 -99% 单位混算根治（v1.23，2026-11-16 美铜事故）：
       · 事故：美铜换月穿越取价时，新浪月份合约分时（HG2703）返回美分/磅，
         未经换算直接写入起始价 618.873，对美元/磅最新价 6.17104 算出 -99.00%。
@@ -373,13 +386,35 @@ def em_snapshot(secids):
     d = json.loads(em_get_retry(u))
     for r in (d.get('data') or {}).get('diff') or []:
         code, last, prev = r.get('f12'), r.get('f2'), r.get('f18')
-        out[code] = {
-            'last': float(last) if isinstance(last, (int, float)) else None,
-            'prev_settle': float(prev) if isinstance(prev, (int, float)) else None,
-        }
+        _last = float(last) if isinstance(last, (int, float)) else None
+        _prev = float(prev) if isinstance(prev, (int, float)) else None
+        # v1.24: 东财美铜是美元/磅（6.01），对外统一美分/磅 → ×100。
+        if secid_of_em_code(code) in EM_CENT_SECIDS:
+            _last = _last * 100.0 if _last is not None else None
+            _prev = _prev * 100.0 if _prev is not None else None
+        out[code] = {'last': _last, 'prev_settle': _prev}
     return out
 
-SINA_CENT_TO_DOLLAR = {'hf_HG'}   # 新浪美铜是美分/磅，东财是美元/磅
+def secid_of_em_code(code):
+    """东财 f12 只给代码（如 HG00Y），补回 secid 形态供白名单比对。"""
+    for s in EM_CENT_SECIDS:
+        if s.split('.')[-1] == code:
+            return s
+    return None
+
+SINA_CENT_TO_DOLLAR = set()   # v1.24: 清空 —— 美铜改为全链路统一【美分/磅】口径
+# v1.24（2026-11-16 用户要求）：美铜对外报价统一用【美分/磅】（600 多），
+#   与新浪 K 线页 / 国内行情软件一致。此前全链路换算成美元/磅（6 块多），
+#   与 K 线页长期对不上。
+#   各源原始单位（实测 2026-11-16）：
+#     · 新浪快照 hf_HG / 月份合约   → 美分/磅（610.87）  ⇒ 原值直用，不再 ÷100
+#     · 新浪分时 minLine            → 美分/磅（610.883） ⇒ 原值直用，不再 ÷100
+#     · 新浪日K                     → 美分/磅（610.950） ⇒ 本来就是美分
+#     · 腾讯 qt.gtimg.cn            → 美分/磅（610.87）  ⇒ 前端原值直用
+#     · 东财快照 101.HG00Y / 5分钟K → 美元/磅（6.0135）  ⇒ 入口处 ×100 转美分
+#   内部所有比较、阈值、自检都按美分口径，比例类阈值（25% 等）不受影响。
+CENT_UNIT_SYMS = {'HG'}          # 统一用美分/磅口径的品种（sym 维度）
+EM_CENT_SECIDS = {'101.HG00Y'}   # 东财源为美元/磅、需 ×100 转美分的 secid
 
 def sina_snapshot(codes):
     out = {}
@@ -403,11 +438,8 @@ def sina_snapshot(codes):
             except ValueError:
                 volume = None
             last = float(f[0])
-            # v1.21: 主连 hf_HG 与月份合约 hf_HG2612 都是美分/磅，必须同尺度归一。
-            if code in SINA_CENT_TO_DOLLAR or re.fullmatch(r'hf_HG\d{4}', code):
-                last /= 100.0
-                if prev is not None:
-                    prev /= 100.0
+            # v1.24: 美铜改全链路美分/磅 —— 新浪快照本来就是美分，不再 ÷100 转美元。
+            # （旧版 v1.21 这里 ÷100，是"页面显示美元/磅"时代的归一；口径已反转。）
             out[code] = {'last': last, 'prev_settle': prev, 'volume': volume,
                          'time': f[6], 'date': f[12]}
     return out
@@ -420,10 +452,11 @@ def em_kline5(secid):
            '&beg=0&end=20500101&lmt=300')
     d = json.loads(em_get_retry(u, tries=1))   # 不重试：本轮失败下一轮定时补
     out = []
+    _scale = 100.0 if secid in EM_CENT_SECIDS else 1.0   # v1.24: 东财美铜美元→美分
     for k in (d.get('data') or {}).get('klines') or []:
         p = k.split(',')
         try:
-            out.append((datetime.strptime(p[0], '%Y-%m-%d %H:%M'), float(p[2])))
+            out.append((datetime.strptime(p[0], '%Y-%m-%d %H:%M'), float(p[2]) * _scale))
         except (ValueError, IndexError):
             continue
     return out
@@ -511,13 +544,8 @@ def sina_minline_today(symbol):
         elif day and re.match(r'^\d{2}:\d{2}$', str(e[0])):
             hh, mm = int(e[0][:2]), int(e[0][3:5])
             out.append((datetime.strptime(day, '%Y-%m-%d').replace(hour=hh, minute=mm), p))
-    # v1.23: 新浪美铜分时（主连 HG 与月份合约 HGxxxx）单位是美分/磅，
-    # 而快照 / 东财是美元/磅。换算收进函数内部统一做，保证所有调用点
-    # （主流程取价 / v1.16 换月穿越 / v1.17 自检）拿到同一口径 ——
-    # 此前换算只在主流程做，换月穿越路径漏掉，把 618.873 美分当美元
-    # 对 6.17 美元算出 -99%。
-    if symbol == 'HG' or re.fullmatch(r'HG\d{4}', symbol):
-        out = [(t, p / 100.0) for t, p in out]
+    # v1.24: 美铜改全链路美分/磅 —— 新浪分时本来就是美分，不再 ÷100 转美元。
+    # （旧版 v1.23 这里 ÷100，是"页面显示美元/磅"时代的归一；口径已反转。）
     out.sort(key=lambda x: x[0])
     return out
 
@@ -1623,15 +1651,20 @@ def main():
         row['gap_min'] = p.get('gap_min')
         if row['last'] is None:
             row['last'] = p.get('last')
-        # v1.23 续接去污：美分值未换算美元被继承（美铜事故：618.873 美分 → -99%）。
-        # 仅限美分口径品种（SINA_CENT_TO_DOLLAR）：继承的起始价偏离最新价超 25%、
-        # 且 /100 后偏差回到正常，判定为美分→美元漏换算，/100 纠正。
-        if row.get('code') in SINA_CENT_TO_DOLLAR and row['close'] is not None \
-                and row['last'] and row['last'] > 0 \
-                and abs(row['close'] - row['last']) / row['last'] > 0.25 \
-                and abs(row['close'] / 100.0 - row['last']) / row['last'] <= 0.25:
-            print(f"续接去污: {row['name']} 继承起始价 {row['close']} 为美分口径，纠正为 {row['close'] / 100.0:.5f}")
-            row['close'] = row['close'] / 100.0
+        # v1.24 口径迁移：美铜由「美元/磅」改为「美分/磅」对外报价。
+        # 旧 data.json 里继承来的起始价是美元口径（6.18），而本轮 last 已是美分（610.8）
+        # → 偏离超 25% 且 ×100 后回到正常 = 旧口径，×100 迁移到新口径。
+        # （反向去污同理：若将来口径再反转，这条也能兜住 ÷100 的方向。）
+        if row['close'] is not None and row['last'] and row['last'] > 0 \
+                and abs(row['close'] - row['last']) / row['last'] > 0.25:
+            if abs(row['close'] * 100.0 - row['last']) / row['last'] <= 0.25:
+                print(f"口径迁移: {row['name']} 继承起始价 {row['close']} 为旧美元口径，"
+                      f"×100 迁到美分 {row['close'] * 100.0:.3f}")
+                row['close'] = row['close'] * 100.0
+            elif abs(row['close'] / 100.0 - row['last']) / row['last'] <= 0.25:
+                print(f"口径迁移: {row['name']} 继承起始价 {row['close']} 为旧美分口径，"
+                      f"÷100 迁到美元 {row['close'] / 100.0:.5f}")
+                row['close'] = row['close'] / 100.0
         if p.get('roll') == 'fix':
             # v1.16: 换月修正行的继承要连"换月"身份一起继承 ——
             # 否则下一轮页面小标消失，且 close 仍是修正口径却没了说明
@@ -1824,8 +1857,8 @@ def main():
         if not rng17:
             continue
         lo17, hi17 = rng17
-        if ('hf_' + sym) in SINA_CENT_TO_DOLLAR:   # 美铜：日K是美分，换算成美元再比
-            lo17, hi17 = lo17 / 100.0, hi17 / 100.0
+        # v1.24: 美铜改美分口径后，新浪日K（本来就是美分）与参考价同口径，无需再换算。
+        # （旧版此处 ÷100 转美元；SINA_CENT_TO_DOLLAR 已清空，这段自然失效。）
         _pad17 = (hi17 - lo17) * 0.02
         if lo17 - _pad17 <= row['close'] <= hi17 + _pad17:
             continue               # 区间内：口径正常
@@ -2021,7 +2054,7 @@ def main():
         'ref_desc': ref_desc,
         # v2.16.1: 前端版本号 —— 页面拿它和自己内置的 UI_VER 比对，
         # 不一致就自动重载（解决"页面常驻打开时旧 JS 永远不更新"的问题）
-        'ui': '2.25',
+        'ui': '2.26',
         'em_ok': em_ok,
         'sina_ok': sina_ok,
         'kline_fail': kline_fail,

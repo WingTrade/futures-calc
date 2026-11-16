@@ -50,6 +50,7 @@ class SnapshotGapTests(unittest.TestCase):
 class SnapshotParsingTests(unittest.TestCase):
     @patch('fetch.http_get')
     def test_copper_main_and_month_contract_share_units_and_volume(self, mock_get):
+        """v1.24: 美铜改美分/磅口径 —— 新浪快照原值直用，主连与月份合约同尺度且保留成交量指纹。"""
         mock_get.return_value = (
             'var hq_str_hf_HG="652.456,,,,,,20:00:00,660.25,,12345,,,2026-10-30,";\n'
             'var hq_str_hf_HG2612="652.456,,,,,,20:00:00,660.25,,12345,,,2026-10-30,";'
@@ -57,9 +58,25 @@ class SnapshotParsingTests(unittest.TestCase):
         snap = fetch.sina_snapshot(['hf_HG', 'hf_HG2612'])
         for code in ('hf_HG', 'hf_HG2612'):
             with self.subTest(code=code):
-                self.assertAlmostEqual(snap[code]['last'], 6.52456)
-                self.assertAlmostEqual(snap[code]['prev_settle'], 6.6025)
+                self.assertAlmostEqual(snap[code]['last'], 652.456)
+                self.assertAlmostEqual(snap[code]['prev_settle'], 660.25)
                 self.assertEqual(snap[code]['volume'], 12345.0)
+
+
+class EmCentUnitTests(unittest.TestCase):
+    """v1.24: 东财美铜是美元/磅，入口必须 ×100 转美分，与新浪同口径。"""
+
+    @patch('fetch.em_get_retry')
+    def test_em_snapshot_scales_copper_to_cent(self, mock_get):
+        import json as _json
+        mock_get.return_value = _json.dumps({'data': {'diff': [
+            {'f12': 'HG00Y', 'f2': 6.0135, 'f18': 6.0905},
+            {'f12': 'CL00Y', 'f2': 87.5, 'f18': 88.0},     # 非美分品种不得被放大
+        ]}})
+        snap = fetch.em_snapshot(['101.HG00Y', '101.CL00Y'])
+        self.assertAlmostEqual(snap['HG00Y']['last'], 601.35)
+        self.assertAlmostEqual(snap['HG00Y']['prev_settle'], 609.05)
+        self.assertAlmostEqual(snap['CL00Y']['last'], 87.5)
 
 
 class ActiveContractTests(unittest.TestCase):

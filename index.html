@@ -232,7 +232,11 @@ var IDX_NAMES = { '标准普尔':1, '道琼工业':1, '纳斯达克':1, '富时A
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.25';      /* v2.25: 「切月中」改为单一确证机制 —— 只比较同一新浪请求里的主连与锚合约昨结；
+var UI_VER = '2.26';      /* v2.26（2026-11-16 用户要求）: 美铜改【美分/磅】口径 ——
+                             接口（腾讯/新浪）本来就是美分，删除全部 ÷100，原值直用，
+                             与新浪 K 线页（600 多）统一。此前页面显示美元/磅（6 块多），
+                             与 K 线页长期对不上。云端 fetch.py v1.24 同步改口径。
+                             ---------- v2.25: 「切月中」改为单一确证机制 —— 只比较同一新浪请求里的主连与锚合约昨结；
                              两边有效、交易日一致且差 >0.1% 才亮。缓存/中转/合约快照缺失或过期一律不猜，
                              删除 v2.23「第二层缺失就回退第一层亮标」的误报路径；切回前台先渲染也不再闪标。
                              云端 roll='fix' 的「换月」小标语义不变（已修正、可信），只保留真正确证的实时「切月中」。
@@ -546,7 +550,7 @@ async function probeRun(mode, node, date, key){
       var hit = pickPoint(pts, date, targetMin);
       if(!hit){ out.fail++; continue; }
       var v = hit.price;
-      if(c.code === 'hf_HG') v = v / 100;                       /* 美铜：接口为美分/磅（与云端同口径） */
+      /* v2.26: 美铜改美分/磅口径 —— 接口本来就是美分，原值直用，不再 ÷100 */
       out.rows[c.name] = v;
       out.actual[c.name] = { t: hit.date.slice(5) + ' ' + hhmmOf(hit.min), gap: targetMin - hit.min };
       out.ok++;
@@ -742,7 +746,7 @@ async function mlFetch(code){
   if(!pts.length) return null;
   var p = pts[pts.length - 1];
   var v = p.price;
-  if(code === 'hf_HG') v = v / 100;                /* 美铜：接口为美分/磅（同云端口径） */
+  /* v2.26: 美铜改美分/磅口径 —— 接口本来就是美分，原值直用，不再 ÷100 */
   var ageMin = null;
   try{
     /* 距今多少分钟：只看"时分"，不依赖新浪给的日期标签
@@ -1182,13 +1186,14 @@ async function refreshTx(){
         var fc = body.split(',');
         if(fc.length > 12 && fc[0]){
           last = parseFloat(fc[0]);
-          if(code === 'hf_HG') last = last / 100;   /* 美铜：接口为美分/磅，页面用美元/磅（与 data.json 同口径） */
+          /* v2.26: 美铜改美分/磅口径 —— 接口本来就是美分，原值直用，不再 ÷100
+             （与 data.json 同口径；此前页面显示美元/磅，与 K 线页 600 多长期对不上） */
           tstr = fc[6] || '';
           dstr = fc[12] || '';   /* v2.8: 数据日期，跨午夜比较用 */
           /* v2.22: 昨结算（f[7]）—— 口径指纹，供「切月中」判定（见 prevFingerprintMark） */
           pval = parseFloat(fc[7]);
           if(!isNaN(pval) && pval > 0){
-            if(code === 'hf_HG') pval = pval / 100;   /* 美铜昨结同为美分口径 */
+            /* v2.26: 美铜昨结同为美分口径，原值直用 */
           }else{
             pval = null;
           }
@@ -1271,7 +1276,7 @@ async function refreshSina(){
         /* v2.22: 昨结算（f[7]，与腾讯快照同字段位）—— 口径指纹，供「切月中」判定 */
         var pv = parseFloat(fb[7]);
         if(isNaN(pv) || pv <= 0) pv = null;
-        if(pv != null && code === 'hf_HG') pv = pv / 100;   /* 美铜昨结为美分口径 */
+        /* v2.26: 美铜昨结为美分口径，原值直用（不再 ÷100） */
         sn[code] = { last:last, time:tstr, prev:pv, prevDate:dstr };
         var key = dstr + ' ' + tstr;
         if(key > (maxD + ' ' + maxT)){ maxT = tstr; maxD = dstr; }
@@ -1334,7 +1339,7 @@ async function refreshAnchor(){
       if(fb.length > 12 && fb[0]){
         var pv = parseFloat(fb[7]);          /* f[7]=昨结算（与主连快照同字段位） */
         if(isNaN(pv) || pv <= 0) continue;   /* 空壳合约（已到期）无昨结 → 证据不足，不判 */
-        if(/^hf_HG(\d|$)/.test(code)) pv = pv / 100;   /* 美铜昨结为美分口径（主连与月份合约同换算） */
+        /* v2.26: 美铜昨结为美分口径，原值直用（主连与月份合约同口径） */
         ap[code] = { prev: pv, prevDate: fb[12] || '' };
       }
     }
