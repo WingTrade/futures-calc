@@ -13,7 +13,6 @@ on:
     - cron: '0 4 * * *'    # 北京 12:00 · 马棕油上午收盘档（落地约 12:26~12:36，供 13:30 前参考；兼 11:30 保险轮）
     - cron: '30 6 * * *'   # 北京 14:30 · 15:00 日盘收盘档预触发（等到 15:01:05；旧 15:02 触发延迟后 15:28 才落地）
     - cron: '22 7 * * *'   # 北京 15:22 · 保险轮（预轮若遇数据源延迟，本轮自动修正；数据无变化时不产生提交）
-    - cron: '30 11 * * *'  # 北京 19:30 · 马棕油下午收盘档（落地约 19:56~20:06，供 21:00 前参考；兼 15:00 保险轮）
     - cron: '45 12 * * 1-5'  # 北京 20:45 · 夜盘保险轮（v1.18 L3：落地约 21:11~21:21。2026-10-26
                              #   实测 19:30 档被 GitHub 丢弃（schedule 免费档高峰常态），夜盘 16:08~23:01
                              #   断档 7 小时恰逢豆粕换月拉锯 → 混口径失真无人发现。此轮 day 档延续，
@@ -29,15 +28,31 @@ on:
 permissions:
   contents: write
 
+# v1.25（2026-11-20）：同一时刻只允许一轮在跑。
+# 15 个 cron 中最短间隔只有 5 分钟，而排队延迟波动可达几十分钟，两轮同时落地时
+# 都会改 data.json；旧版靠提交步骤的 git pull --rebase 收尾，谁后写谁就冲突失败。
+# 实测 3 次失败（#513 / #545 / #559）全部是这个模式：抓取成功、提交步骤 0~1 秒失败。
+concurrency:
+  group: futures-calc-fetch
+  cancel-in-progress: false   # 排队、不取消；任何一轮抓到一半的数据都不白丢
+
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    timeout-minutes: 45       # 预轮最多等 32 分钟 + 抓数约 3 分钟；45 分钟只防真卡死，误伤不到正常等待
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      # v1.25：抓取前先同步远程。checkout 拿到的是"触发那一刻"的 main，
+      # 排队 26~36 分钟期间可能有别的轮次提交过新 data.json。
+      # fetch.py 的换月判断/续存继承都拿"上一版 data.json"当锚，用旧快照会误判换月。
+      - name: 同步远程（抓取前）
+        run: git pull --rebase
 
       - name: 拉取数据（全量）
         if: github.event.schedule != '45 23 * * *'
@@ -47,12 +62,52 @@ jobs:
         if: github.event.schedule == '45 23 * * *'
         run: python fetch.py --us-only
 
-      - name: 提交数据
+      # v1.25：提交步骤改成"保住本轮数据 + 冲突自动重试"。
+      # - 先把本轮 data.json 复制到 /tmp：rebase / reset 期间它绝不能被远程版本覆盖；
+      # - pull --rebase -X ours：data.json 是整文件重写，冲突时取本轮版本；
+      # - push 后重试：3 次，每次先 fetch + reset 到远程最新，再重放本轮数据。
+      # 这样即使有人在本轮抓取期间手动推了代码（实测 11-20 13:50 那次），
+      # 也不会整轮作废。
+      - name: 提交数据（冲突自动重试）
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp data.json /tmp/data.round.json
           git add data.json
-          git diff --cached --quiet || git commit -m "update data $(date -u +%FT%TZ)"
-          # 相邻轮次（07:45 美股轮 / 08:00 早盘前轮）撞车时先合流再推，避免非快进失败
-          git pull --rebase
-          git push
+          if git diff --cached --quiet; then
+            echo "data.json 无变化，跳过提交"
+            exit 0
+          fi
+          git commit -m "update data $(date -u +%FT%TZ)"
+
+          for i in 1 2 3; do
+            echo "提交尝试 $i/3"
+            if git pull --rebase -X ours; then
+              # rebase 已经把远程改动合进来；确保落盘的仍是本轮抓的数据
+              cp /tmp/data.round.json data.json
+              git add data.json
+              if ! git diff --cached --quiet; then
+                git commit -m "update data $(date -u +%FT%TZ) (retry-safe)"
+              fi
+              if git push; then
+                echo "提交成功（尝试 $i）"
+                exit 0
+              fi
+            else
+              git rebase --abort || true
+            fi
+
+            if [ "$i" -lt 3 ]; then
+              echo "第 $i 次失败，重置到远程最新后重试"
+              git fetch origin main
+              git reset --hard origin/main
+              cp /tmp/data.round.json data.json
+              git add data.json
+              git commit -m "update data $(date -u +%FT%TZ)"
+              sleep $((i * 10))
+            fi
+          done
+
+          echo "::error::提交失败：已重试 3 次，本轮数据未写入"
+          exit 1
