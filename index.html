@@ -232,7 +232,13 @@ var IDX_NAMES = { '标准普尔':1, '道琼工业':1, '纳斯达克':1, '富时A
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.26';      /* v2.26（2026-11-16 用户要求）: 美铜改【美分/磅】口径 ——
+var UI_VER = '2.27';      /* v2.27（2026-11-20）：马棕油 / 日橡胶起始价显示「—」修复 ——
+                             buildPoints 原先拿分时表【表头日期】当首点日期，但表头是"交易日"、
+                             首笔却发生在前一晚（马棕油 21:00、日橡胶 16:00 开盘），整表偏移一天，
+                             pickPoint 在第一个点就 break 返回 null → 起始价「—」、涨跌幅停在 0.00%。
+                             改为优先取每行自带的完整时间戳定日期；补档单项取不到时回退云端值，
+                             不再把起始价置空。顺带：美原糖 15:30 开盘前不再显示 0.00%，改显示「待开盘」。
+                             ---------- v2.26（2026-11-16 用户要求）: 美铜改【美分/磅】口径 ——
                              接口（腾讯/新浪）本来就是美分，删除全部 ÷100，原值直用，
                              与新浪 K 线页（600 多）统一。此前页面显示美元/磅（6 块多），
                              与 K 线页长期对不上。云端 fetch.py v1.24 同步改口径。
@@ -310,6 +316,12 @@ var SSE_MINUTE_URL = 'https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=s
 var SSE_MS = 15000;       /* 窗口内检查/刷新间隔（毫秒） */
 
 function pad2(n){ return (n<10?'0':'') + n; }
+/* v2.27: 美原糖是否已开盘（北京 15:30，ICE 原糖时段 15:30 → 次日 01:00）。
+   开盘前它当天没有任何成交，任何"对比今日节点"的基准都等于最新价，涨跌幅必然是 0。 */
+function sugarOpened(){
+  var d = new Date();
+  return (d.getHours()*60 + d.getMinutes()) >= 15*60 + 30;
+}
 function todayKey(){
   var d = new Date();
   return '' + d.getFullYear() + pad2(d.getMonth()+1) + pad2(d.getDate());
@@ -437,7 +449,22 @@ function jsonpDailyK(sym){
   });
 }
 
-/* 分时表 → [{date,min,price}]（时间倒退视为跨日） */
+/* v2.27: 行内完整时间戳 → 日期（每行最后一个字段，如 "2026-11-19 21:00:00"）。
+   新浪各品种的分时表每行都带它；拿不到时返回 null，由下方"时钟倒退→次日"兜底。 */
+function stampDateOf(e){
+  for(var i=e.length-1;i>=1;i--){
+    var s = String(e[i]);
+    if(/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(s)) return s.slice(0,10);
+  }
+  return null;
+}
+/* 分时表 → [{date,min,price}]
+   v2.27（2026-11-20 马棕油/日橡胶起始价显示「—」事故）：
+   原先拿【表头日期】当第一个分钟点的日期，但表头写的是"交易日"，而交易日的第一个分钟点
+   发生在前一晚 —— 马棕油 21:00 开盘、日橡胶 16:00 开盘，表头是 11-20、首笔时间戳却是 11-19 21:00。
+   于是整张表偏移一天：昨晚夜盘的点被标成 11-20，当天日盘的点被"时钟倒退→次日"标成 11-21，
+   pickPoint(11-20, 11:30) 在第一个点就 break，返回 null → 页面起始价「—」、涨跌幅停在 0.00%。
+   修复：日期优先取行内完整时间戳（真实时钟日），缺失时才退回"时钟倒退→次日"的推断。 */
 function buildPoints(arr){
   var out = [], prev = -1, cur = null;
   if(!arr || !arr.length) return out;
@@ -449,7 +476,10 @@ function buildPoints(arr){
     var mn = parseInt(tk.slice(0,2),10)*60 + parseInt(tk.slice(3,5),10);
     var price = parseFloat(e[1]);
     if(isNaN(price)) continue;
-    if(prev >= 0 && mn < prev){
+    var sd = stampDateOf(e);
+    if(sd){
+      cur = sd;                                    /* 真实时钟日，最可靠 */
+    }else if(prev >= 0 && mn < prev){
       var d = new Date(cur + 'T00:00:00');
       d.setDate(d.getDate()+1);
       cur = d.getFullYear()+'-'+pad2(d.getMonth()+1)+'-'+pad2(d.getDate());
@@ -617,16 +647,18 @@ function baseQuoteOf(r){
   }
   if(refLiveActive()){
     var v = refLive.rows[r.name];
-    /* v2.12: 美原糖不参与补档（它的基准跟着国内糖的收盘时刻走，与档位无关）→ 用云端值
-       v2.19: 富时A50 同理 —— 双窗口口径与档位无关，永远用云端值 */
-    if(v == null && (r.name === '美原糖' || r.name === '富时A50')){
+    /* v2.27：补档没算出这一行 → 回退云端值（起始价 + 云端真实取价时刻）。
+       原先这里对非原糖/A50 的行直接 close=null，页面「起始价」显示「—」、涨跌幅还停在
+       云端那个 0.00%，看起来就是"这行没有计算数据"。云端值至少是同口径的真价，
+       「起始时间」列会如实写出它取到哪一笔，比空着更能说明情况。 */
+    if(v == null){
       return { close: r.close, ref: r.ref_actual || r.ref, mark: '', markTip: '', refTip: '' };
     }
     var a = refLive.actual[r.name];
     var refTxt = a ? a.t : ((refLive.date || '').slice(5) + ' ' + refLive.node);
     /* 补档算出来的基准价与云端逐位一致（同源同口径），所以【不做任何标记】——
        标出来只会让人怀疑"这个数是不是临时的"。只有"算不出来"的情况才需要说明。 */
-    return { close: (v == null ? null : v), ref: refTxt, mark: '', markTip: '', refTip: '' };
+    return { close: v, ref: refTxt, mark: '', markTip: '', refTip: '' };
   }
   /* v2.13（用户要求）：取消 ※ 小标与悬停说明 ——「起始时间」列已经把真实取价笔显示出来了，
      看着时间就能明白，不需要额外小标。豆粕这类成交稀疏是正常现象（可容错），
@@ -926,11 +958,17 @@ function rowHtml(r){
      换月提示只保留在「起始时间」列（云端 ref 已置为「换月」二字），
      看到这两个字就知道该去查 K 线了。 */
   var refCell = '<td class="ref"'+(r.refTip?' title="'+r.refTip+'"':'')+'>'+(r.ref||'—')+mark+'</td>';
+  /* v2.27: 未开盘行（目前只有美原糖白档）—— 涨跌与涨跌幅都不该写 0.00%，
+     那会被读成"没涨没跌"，实际是"今天还没有成交价可比"。 */
+  var chgCell = r.pend ? '<td class="miss">—</td>'
+                       : '<td class="'+cls(r.chg)+'">'+fmt2(r.chg,true)+'</td>';
+  var pctCell = r.pend ? '<td class="miss" title="'+(r.pendTip||'未开盘')+'">待开盘</td>'
+                       : '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+flag+src+'</td>';
   return '<td class="name">'+nameHtml(nm, r)+'</td>'+
     '<td class="'+(r.close==null?'miss':'')+'">'+fmt2(r.close)+'</td>'+
     '<td class="'+(r.last==null?'miss':'')+'">'+fmt2(r.last)+'</td>'+
-    '<td class="'+cls(r.chg)+'">'+fmt2(r.chg,true)+'</td>'+
-    '<td class="'+cls(r.pct)+'">'+fmtPct(r.pct)+flag+src+'</td>'+
+    chgCell+
+    pctCell+
     refCell;
 }
 function render(){
@@ -983,7 +1021,14 @@ function render(){
     /* v2.11: 只有"本该有实时价"的行才标「缓存」；
        美股三行是收盘口径（早上 9 点前看时早已收盘，不存在时效问题），不标任何小标 */
     if(!stag && !q && r.last != null && sinaCodeOf(r)) stag = '缓存';
-    var html = rowHtml({name:r.name, close:bq.close, last:last, chg:chg, pct:pct,
+    /* v2.27: 美原糖 15:30（北京）才开盘。白档（10:15 / 11:30）时它当天还没有任何成交，
+       云端基准取到的就是前一晚 01:59 那笔收盘价，与最新价完全同一笔 → 涨跌幅恒为 0.00%。
+       这个 0 会被读成"没涨没跌"，实际是"今天还没开始"。按"宁可显示缺、不可显示错"，
+       开盘前显示「待开盘」；有真涨跌时（如 night 档对比 23:00）照常显示数字。 */
+    var pend = (r.name === '美原糖' && !sugarOpened() && bq.close != null && last != null &&
+                Math.abs(last - bq.close) < 1e-9);
+    var html = rowHtml({name:r.name, close:bq.close, last:last, chg:chg, pct:pct, pend:pend,
+                        pendTip:'美原糖 15:30（北京时间）开盘；开盘前没有当天的成交价可比，故不显示 0.00%',
                         flag:r.flag, ref:bq.ref, mark:bq.mark, markTip:bq.markTip,
                         refTip:bq.refTip, src:stag, srcTip:srcTagTip(stag, r, q)});
     /* v2.20 修复：innerHTML 批量写入必须带 <tr> 包裹 —— rowHtml 返回的是裸 <td> 串，

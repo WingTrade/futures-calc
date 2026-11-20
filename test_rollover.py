@@ -238,5 +238,82 @@ class FrontendFingerprintTests(unittest.TestCase):
         self.assertIn('10 个场景通过', result.stdout)
 
 
+# v2.27（2026-11-20 马棕油/日橡胶起始价「—」事故）：分时表取点的日期归属。
+# 表头日期是「交易日」，而交易日的第一个分钟点发生在【前一晚】（马棕油 21:00、日橡胶 16:00 开盘）。
+# 旧实现把表头日期当首点日期 → 整表偏移一天，目标日的点在遍历第一步就 break，取价返回 null。
+POINTS_HARNESS = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+function extract(startMarker, endMarker) {
+  const start = html.indexOf(startMarker);
+  const end = html.indexOf(endMarker, start);
+  assert(start >= 0 && end > start, '无法提取前端函数: ' + startMarker);
+  return html.slice(start, end);
+}
+vm.runInThisContext(
+  'function pad2(n){ return (n<10?"0":"") + n; }\n' +
+  extract('function stampDateOf(e){', '/* 取 ≤ 目标') + '\n' +
+  extract('function pickPoint(pts, dateKey, targetMin){', '/* ---------- 缓存与状态判定')
+);
+
+// ① 马棕油式：表头 11-20（交易日），首笔实际是 11-19 21:00（夜盘）
+const fcpo = [
+  ["2026-11-20","4333.000","bmd","","21:00","4332.300","251","62003","4331.621","2026-11-19 21:00:00"],
+  ["21:01","4345.640","232","62003","4337.487","2026-11-19 21:01:00"],
+  ["23:29","4368.200","0","62003","4360.000","2026-11-19 23:29:00"],
+  ["10:30","4380.000","0","62003","4380.000","2026-11-20 10:30:00"],
+  ["11:30","4305.390","0","62003","4305.390","2026-11-20 11:30:00"],
+  ["11:31","4299.020","0","62003","4299.020","2026-11-20 11:31:00"]
+];
+const pts = buildPoints(fcpo);
+assert.strictEqual(pts[0].date, '2026-11-19', '表首笔属于前一晚，必须按行内时间戳定日期');
+assert.strictEqual(pts[pts.length - 1].date, '2026-11-20', '当天日盘不得被推成次日');
+const hit = pickPoint(pts, '2026-11-20', 690);
+assert(hit && hit.min === 690 && hit.price === 4305.39, '11:30 节点必须取到当天那一笔');
+const before = pickPoint(pts, '2026-11-20', 689);
+assert(before && before.min === 630, '节点之前取 10:30 那笔，不能跨到前一天夜盘');
+
+// ② 日橡胶式：表头 11-20，首笔 11-19 16:00（夜盘更早），同样不得偏移
+const rss3 = [
+  ["2026-11-20","422.800","tocom","","16:00","423.100","2","2287","423.100","2026-11-19 16:00:00"],
+  ["16:01","423.000","1","2287","423.067","2026-11-19 16:01:00"],
+  ["09:00","420.000","1","2287","421.000","2026-11-20 09:00:00"],
+  ["11:29","423.759","1","2287","423.500","2026-11-20 11:29:00"]
+];
+const rp = buildPoints(rss3);
+const rh = pickPoint(rp, '2026-11-20', 690);
+assert(rh && rh.price === 423.759, '日橡胶 11:30 取 11:29 那笔');
+
+// ③ 无行内时间戳的旧格式：仍按"时钟倒退 → 次日"推断，不因新逻辑失效
+const legacy = [
+  ["2026-11-19","18.040","nybot","","16:30","17.954","1541","0","17.981"],
+  ["16:31","18.019","808","0","17.982"],
+  ["23:59","17.560","0","0","17.560"],
+  ["15:30","17.300","0","0","17.300"]
+];
+const lp = buildPoints(legacy);
+assert.strictEqual(lp[0].date, '2026-11-19');
+assert.strictEqual(lp[lp.length - 1].date, '2026-11-20', '时钟倒退仍应推断为次日');
+assert.strictEqual(pickPoint(lp, '2026-11-20', 960).price, 17.3);
+console.log('分时取点日期归属：3 类场景通过');
+'''
+
+
+@unittest.skipUnless(shutil.which('node'), '前端回归测试需要 Node.js')
+class FrontendMinlinePointTests(unittest.TestCase):
+    def test_points_use_row_timestamp_not_session_header_date(self):
+        from pathlib import Path
+        index = Path(__file__).with_name('index.html')
+        result = subprocess.run(
+            [shutil.which('node'), '-e', POINTS_HARNESS, str(index)],
+            capture_output=True, text=True, encoding='utf-8', timeout=20,
+        )
+        self.assertEqual(result.returncode, 0,
+                         msg=result.stdout + '\n' + result.stderr)
+        self.assertIn('3 类场景通过', result.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()
