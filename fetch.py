@@ -1,7 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.24）
+外盘涨跌统计 · 云端抓取脚本（GitHub Actions 版 v1.25）
 ======================================================
+  - 换月自检同值误标修复（v1.25，2026-11-27）：
+      · 铁矿 89.42 出日K覆盖区间，但按 FEF2701 原时点重新取价仍是 89.42；
+        数值没变却写 roll='fix' 是假换月。现在同值（含浮点误差）保留原行、不写换月身份。
+      · 保留真实价差修正与布伦特续存链；补旧分时跨午夜、坏快照隔离、零持仓指纹、
+        日K坏根、自检分时新鲜度闸门及 data.json 原子写。
   - 美铜口径统一为【美分/磅】（v1.24，2026-11-16 用户要求）：
       · 事故背景：网页主页美铜显示 6 块多（美元/磅），点进去的新浪 K 线页显示 600 多
         （美分/磅），同一品种两个数，用户核对时无法对上。
@@ -271,7 +276,7 @@ v1.0（2026-10-14）：
   从本机版 v1.7 移植核心逻辑：时间统一 UTC+8；结果直接写 data.json；
   不做轮内重试补拉，每轮由 Actions 定时重跑，失败品种下一轮自动补。
 """
-import os, sys, json, time, re, random
+import os, sys, json, time, re, random, math, tempfile
 import urllib.request, urllib.parse
 from datetime import datetime, timedelta, timezone
 
@@ -434,10 +439,13 @@ def sina_snapshot(codes):
             except ValueError:
                 prev = None
             try:
-                volume = float(f[9]) if f[9] else None   # f[9]=成交量，主力身份辅助指纹
-            except ValueError:
+                volume = float(f[9]) if f[9] else None   # f[9]=持仓量（与新浪日K position一致），身份辅助指纹
+            except (ValueError, TypeError):
                 volume = None
-            last = float(f[0])
+            try:
+                last = float(f[0])
+            except (ValueError, TypeError):
+                continue               # 单条坏记录只跳过自己，不拖垮整批快照
             # v1.24: 美铜改全链路美分/磅 —— 新浪快照本来就是美分，不再 ÷100 转美元。
             # （旧版 v1.21 这里 ÷100，是"页面显示美元/磅"时代的归一；口径已反转。）
             out[code] = {'last': last, 'prev_settle': prev, 'volume': volume,
@@ -529,21 +537,38 @@ def sina_minline_today(symbol):
     out = []
     if not isinstance(arr, list) or not arr:
         return out
-    day = arr[0][0] if isinstance(arr[0], list) and len(arr[0]) >= 10 else None
+    day = arr[0][0] if isinstance(arr[0], list) and len(arr[0]) >= 6 else None
+    fallback_date, prev_clock = None, None
+    try:
+        fallback_date = datetime.strptime(day, '%Y-%m-%d') if day else None
+    except (ValueError, TypeError):
+        pass
     for i, e in enumerate(arr):
         if not isinstance(e, list) or len(e) < 2:
             continue
-        pidx = 5 if (i == 0 and len(e) >= 6) else 1
+        first = i == 0 and len(e) >= 6
+        pidx = 5 if first else 1
+        clock = str(e[4] if first else e[0])
         try:
             p = float(e[pidx])
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, TypeError):
             continue
         ts = e[-1] if isinstance(e[-1], str) and re.match(r'^\d{4}-\d{2}-\d{2} ', e[-1]) else None
         if ts:
-            out.append((datetime.strptime(ts[:16], '%Y-%m-%d %H:%M'), p))
-        elif day and re.match(r'^\d{2}:\d{2}$', str(e[0])):
-            hh, mm = int(e[0][:2]), int(e[0][3:5])
-            out.append((datetime.strptime(day, '%Y-%m-%d').replace(hour=hh, minute=mm), p))
+            try:
+                hit = datetime.strptime(ts[:16], '%Y-%m-%d %H:%M')
+            except ValueError:
+                continue
+            out.append((hit, p))
+            fallback_date = hit.replace(hour=0, minute=0)
+        elif fallback_date is not None and re.match(r'^\d{2}:\d{2}$', clock):
+            # 无行内时间戳的旧格式：时钟倒退说明跨午夜，不能一直钉在表头日期。
+            if prev_clock is not None and clock < prev_clock:
+                fallback_date += timedelta(days=1)
+            hh, mm = int(clock[:2]), int(clock[3:5])
+            out.append((fallback_date.replace(hour=hh, minute=mm), p))
+        if re.match(r'^\d{2}:\d{2}$', clock):
+            prev_clock = clock
     # v1.24: 美铜改全链路美分/磅 —— 新浪分时本来就是美分，不再 ÷100 转美元。
     # （旧版 v1.23 这里 ÷100，是"页面显示美元/磅"时代的归一；口径已反转。）
     out.sort(key=lambda x: x[0])
@@ -615,8 +640,9 @@ def rollover_suspect(bars, last, now, tol=0.005, min_span=0.002, max_age_min=30)
         return False, ''
     return True, '最新价 %s 落在分时表区间 [%s, %s] 之外' % (last, lo, hi)
 
-def rollover_suspect_close(bars, close, ps, exclude=False,
-                           tol=0.005, min_span=0.002, fix_pct=0.025, watch_pct=0.015):
+def rollover_suspect_close(bars, close, ps, exclude=False, now=None,
+                           tol=0.005, min_span=0.002, fix_pct=0.025, watch_pct=0.015,
+                           max_age_min=30):
     """v1.15: 【起始价 close】的换月嫌疑判定 —— 覆盖"参考价跨换月线被继承钉住"这一真实机制。
 
     为什么要补这条（v1.14 的缺口）：
@@ -641,6 +667,9 @@ def rollover_suspect_close(bars, close, ps, exclude=False,
     hi = max(p for _dt, p in bars)
     if hi <= 0 or (hi - lo) / hi < min_span:
         return None, None, ''          # 区间过窄 → 不可靠
+    age_min = ((now or now_cn()) - bars[-1][0]).total_seconds() / 60.0
+    if age_min > max_age_min:
+        return None, None, ''          # 与通道一一致：旧分时表不能证明当前换月
     if lo * (1 - tol) <= close <= hi * (1 + tol):
         return None, None, ''          # 起始价就在当段区间内 → 正常
     gap = abs(close - ps) / ps
@@ -735,11 +764,13 @@ def sina_active_contracts(sina_map, now):
             prev_gap = (abs(qprev - mprev) / abs(mprev)
                         if qprev is not None and mprev else 1.0)
             qvolume = q.get('volume')
-            volume_mismatch = (0 if qvolume is not None and mvolume is not None
-                               and qvolume == mvolume else 1)
-            # v1.22: 近价 + 近刻不是充分的身份证明。昨结或成交量至少一项相同，
-            # 才允许进入强/弱候选；否则马棕油这类近价异源行情会被误认成相邻月份。
-            corroborated = prev_gap == 0 or volume_mismatch == 0
+            volume_match = (qvolume is not None and qvolume > 0
+                            and mvolume is not None and mvolume > 0
+                            and qvolume == mvolume)
+            volume_mismatch = 0 if volume_match else 1
+            # v1.22: 近价 + 近刻不是充分的身份证明。昨结或有效持仓量至少一项相同，
+            # 才允许进入强/弱候选；0 == 0 是空壳共同特征，不是身份证明。
+            corroborated = prev_gap == 0 or volume_match
             score = (gap, prev_gap, volume_mismatch, lag, cc)
             if not corroborated:
                 continue
@@ -797,11 +828,16 @@ def month_kline_range(symbol, n=2, max_stale_days=5, now=None):
         except (ValueError, TypeError):
             continue
         try:
-            ks.append((d, float(k['low']), float(k['high'])))
+            lo, hi = float(k['low']), float(k['high'])
+            if not math.isfinite(lo) or not math.isfinite(hi) or lo <= 0 or hi < lo:
+                continue               # 坏高低价/单位空壳不能参与换月判据
+            if d <= now.date():
+                ks.append((d, lo, hi))
         except (ValueError, KeyError, TypeError):
             continue
     if len(ks) < n:
         return None
+    ks.sort(key=lambda x: x[0])
     ks = ks[-n:]
     if (now.date() - ks[-1][0]).days > max_stale_days:
         return None
@@ -1178,6 +1214,24 @@ def ref_price_from_bars(bars, ref_dt, max_gap_hours=14, now=None, allow_stale=Fa
         if not feed_live:
             return None, 'stale', None
     return best[1], 'ok', best[0]                   # v1.10: 一并返回取价笔时刻
+
+
+def write_json_atomic(path, data):
+    """同目录临时文件 + os.replace，写失败时保留上一版完整 data.json。"""
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix='.data-', suffix='.tmp', dir=directory, text=True)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 # ---------------- 主流程 ----------------
 def main():
@@ -1895,6 +1949,13 @@ def main():
                 and abs(new_close17 - row['last']) / row['last'] > 0.25:
             new_close17 = None
         old_close17 = row['close']
+        if new_close17 is not None and math.isclose(
+                old_close17, new_close17, rel_tol=1e-12, abs_tol=1e-9):
+            # 日K只是覆盖不全，重新取到的同合约原价已经反驳“口径失真”。
+            # 数值没变却写 roll='fix'，正是 2026-11-26 铁矿 89.42 误报的来源。
+            print(f"换月自检不改标: {row['name']} 重新取价仍为 {new_close17}，"
+                  f"日K区间 [{lo17}, {hi17}] 不覆盖该真实时点")
+            continue
         row['roll_src'] = row.get('ref')
         if new_close17 is not None:
             # 穿越成功：参考价 = 新合约在原时点的真实价，ref 文本保持原时点
@@ -1976,7 +2037,7 @@ def main():
         # 通道2（v1.15）：起始价跑出区间 + 明显偏离昨结 → 跨换月线被继承钉住
         if level != 'fix':
             lv2, gap2, why2 = rollover_suspect_close(
-                bars_row, row.get('close'), ps,
+                bars_row, row.get('close'), ps, now=now,
                 exclude=bool(ROLLOVER_EXCLUDE.get(row['name'])))
             if lv2:
                 level, why = lv2, why2
@@ -2054,7 +2115,7 @@ def main():
         'ref_desc': ref_desc,
         # v2.16.1: 前端版本号 —— 页面拿它和自己内置的 UI_VER 比对，
         # 不一致就自动重载（解决"页面常驻打开时旧 JS 永远不更新"的问题）
-        'ui': '2.27',
+        'ui': '2.28',
         'em_ok': em_ok,
         'sina_ok': sina_ok,
         'kline_fail': kline_fail,
@@ -2065,8 +2126,7 @@ def main():
         'rows': rows,
     }
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data.json')
-    with open(out, 'w', encoding='utf-8', newline='\n') as f:
-        json.dump(data, f, ensure_ascii=False, indent=1)
+    write_json_atomic(out, data)
     # v1.10: 顺带把"实际取价笔"的偏移情况打到日志里，方便一眼看出稀疏品种
     _gaps = [(r['name'], r['gap_min']) for r in rows if r.get('gap_min') is not None]
     if _gaps:
@@ -2134,8 +2194,7 @@ def main_us_only():
     # 补齐后三行日期一致，避免表里混两种口径
     changed += align_us_index_rows(data.get('rows', []), now)
     if changed:
-        with open(out, 'w', encoding='utf-8', newline='\n') as f:
-            json.dump(data, f, ensure_ascii=False, indent=1)
+        write_json_atomic(out, data)
         print(f'us-only 完成: {changed} 行更新, 已写入 {out}, 耗时 {time.time() - t0:.0f} 秒')
     else:
         print('us-only 完成: 无变化，不写文件')

@@ -232,7 +232,13 @@ var IDX_NAMES = { '标准普尔':1, '道琼工业':1, '纳斯达克':1, '富时A
 var TX_URL = 'https://qt.gtimg.cn/q=';
 var TX_MS = 15000;        /* 最新价刷新间隔（毫秒） */
 var JSON_MS = 60000;      /* data.json 检查间隔（毫秒） */
-var UI_VER = '2.27';      /* v2.27（2026-11-20）：马棕油 / 日橡胶起始价显示「—」修复 ——
+var FETCH_TIMEOUT_MS = 12000; /* 活跃 fetch 轮询的应用层超时，防止忙碌锁永久卡死 */
+var DATA_CACHE_STALE_MS = 7200000; /* 本地起始价只作 2 小时内的秒开缓存；权威值仍由 data.json 决定 */
+var UI_VER = '2.28';      /* v2.28（2026-11-27）：轮询超时自愈、旧起始价缓存拦截；云端修铁矿同值误标 ——
+                             fetch 永不返回会让 jsonBusy/txBusy 等永久为 true，后续轮询全部跳过；
+                             统一在响应正文读取完成前保持 AbortController 超时，finally 必释放忙碌锁。
+                             loadCache 同时校验 data.generated_at，旧起始价不与新实时价拼接。
+                             ---------- v2.27（2026-11-20）：马棕油 / 日橡胶起始价显示「—」修复 ——
                              buildPoints 原先拿分时表【表头日期】当首点日期，但表头是"交易日"、
                              首笔却发生在前一晚（马棕油 21:00、日橡胶 16:00 开盘），整表偏移一天，
                              pickPoint 在第一个点就 break 返回 null → 起始价「—」、涨跌幅停在 0.00%。
@@ -781,32 +787,38 @@ async function mlFetch(code){
   /* v2.26: 美铜改美分/磅口径 —— 接口本来就是美分，原值直用，不再 ÷100 */
   var ageMin = null;
   try{
-    /* 距今多少分钟：只看"时分"，不依赖新浪给的日期标签
-       （不同品种的日期标签语义不一致：有的是时段开始日、有的是交易归属日，
-        例如日橡胶的表首根标 2026-10-16 / 16:13，末根 14:11 其实属于次日归属，
-        按标签推会算成"未来"→ 误判成 0 分钟，把 1 小时前的价当当下价）。 */
-    var nd = new Date();
-    ageMin = (nd.getHours() * 60 + nd.getMinutes()) - p.min;
-    if(ageMin < -5) ageMin += 1440;   /* 末根时间"看上去在未来" → 其实是昨天(或本时段前一日)那一笔 */
-    if(ageMin < 0) ageMin = 0;
+    /* buildPoints 已优先采用每行完整时间戳；用完整日期算年龄，避免跨午夜把旧价当新价。 */
+    var stamp = Date.parse(p.date + 'T' + hhmmOf(p.min) + ':00');
+    if(isFinite(stamp)){
+      ageMin = Math.floor((Date.now() - stamp) / 60000);
+      if(ageMin < 0 && ageMin >= -5) ageMin = 0;       /* 秒级取整造成的小幅未来 */
+      if(ageMin < -5) ageMin = null;                   /* 日期无法确信，不假装新鲜 */
+    }
   }catch(e){}
   return { last: v, t: hhmmOf(p.min), date: p.date, ageMin: ageMin, ts: Date.now() };
 }
 
 /* 接管行的标记：新鲜的分时价与快照只差几秒，**不标**；
    只有"这行的价确实是旧时刻的"（该品种此刻无新成交）才把时刻摆出来，不装成当下价。 */
+function mlAge(m){
+  if(!m || m.ageMin == null) return null;
+  /* 取价后页面还会继续驻留；年龄必须随时间增长，不能冻结在拉取那一分钟。 */
+  return Math.floor(m.ageMin + Math.max(0, Date.now() - (m.ts || Date.now())) / 60000);
+}
 function mlTag(m){
   if(!m) return '';
-  if(m.ageMin != null && m.ageMin > ML_STALE_MIN && m.t) return '分时 ' + m.t;
+  var age = mlAge(m);
+  if((age == null || age > ML_STALE_MIN) && m.t) return '分时 ' + m.t;
   return '';
 }
 function mlTagTip(m){
   if(!m) return '此价取自新浪分时表末根（与起始价同源同口径）';
   var base = '此价取自新浪分时表末根（与起始价同源同口径，约 1 分钟粒度）';
-  if(m.ageMin != null && m.ageMin > ML_STALE_MIN){
-    return base + '；该品种此刻无新成交，这一笔是 ' + m.t + ' 的（距今约 ' + m.ageMin + ' 分钟）';
+  var age = mlAge(m);
+  if(age != null && age > ML_STALE_MIN){
+    return base + '；该品种此刻无新成交，这一笔是 ' + m.t + ' 的（距今约 ' + age + ' 分钟）';
   }
-  return base + '；该笔时刻 ' + (m.t || '—') + '（距今约 ' + (m.ageMin == null ? '?' : m.ageMin) + ' 分钟）';
+  return base + '；该笔时刻 ' + (m.t || '—') + '（距今约 ' + (age == null ? '未知' : age) + ' 分钟）';
 }
 
 async function mlTick(){
@@ -893,13 +905,37 @@ function hhmm(s){
   return s.length>=16 ? s.slice(11,16) : s;
 }
 
+/* fetch 必须覆盖“响应正文读取”阶段：只包住 headers 仍可能在 r.text()/r.json() 永久挂起。 */
+async function fetchTextWithTimeout(url, options, timeoutMs){
+  var ctl = new AbortController();
+  var opts = Object.assign({}, options || {}, { signal: ctl.signal });
+  var tid = setTimeout(function(){ ctl.abort(); }, timeoutMs || FETCH_TIMEOUT_MS);
+  try{
+    var r = await fetch(url, opts);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.text();
+  }finally{
+    clearTimeout(tid);
+  }
+}
+function generatedAtMs(d){
+  if(!d || !d.generated_at) return NaN;
+  var s = String(d.generated_at);
+  if(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(s)) s += ':00';
+  return Date.parse(s.replace(' ', 'T'));
+}
+
 /* ---------- 本地缓存：打开秒开（含上次实时值快照，防止打开瞬间闪回旧价） ---------- */
 function loadCache(){
   try{
     var s = localStorage.getItem(CACHE_KEY);
     if(!s) return;
     var o = JSON.parse(s);
-    if(o && o.data && o.data.rows) state.data = o.data;
+    var dataTs = generatedAtMs(o && o.data), dataAge = Date.now() - dataTs;
+    /* 缓存只用于秒开，不是权威数据。起始价本身过旧就直接弃用，等 data.json；
+       否则实时接口恢复后会拼出“旧起始价 + 新最新价”的假涨跌幅。 */
+    if(o && o.data && Array.isArray(o.data.rows) && isFinite(dataTs) &&
+       dataAge >= -300000 && dataAge < DATA_CACHE_STALE_MS) state.data = o.data;
     /* 仅当快照 2 小时内才恢复实时值；过旧可能跨交易时段，弃用走 data.json */
     if(o && (Date.now() - (o.ts||0) < 7200000)){
       if(o.sn) state.sn = o.sn;
@@ -1069,9 +1105,8 @@ async function refreshSseBase(){
   if(st && st.date === todayKey() && st.key === ph.key && st.exact) return;   /* 已有精确基准，不必再拉 */
   sseBaseBusy = true;
   try{
-    var r = await fetch(SSE_MINUTE_URL, {cache:'no-store'});
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    var d = await r.json();
+    var text = await fetchTextWithTimeout(SSE_MINUTE_URL, {cache:'no-store'}, FETCH_TIMEOUT_MS);
+    var d = JSON.parse(text);
     var blk = d && d.data && d.data[SSE_TX_CODE] && d.data[SSE_TX_CODE].data;
     var arr = blk && blk.data;
     if(!arr || !arr.length) throw new Error('no minute data');
@@ -1105,9 +1140,7 @@ async function refreshSseLive(){
   if(ph.key === '1130' && nowSec() < 46800){ state.sseLive = null; return; }   /* 13:00 前午休 */
   sseLiveBusy = true;
   try{
-    var r = await fetch(TX_URL + SSE_TX_CODE, {cache:'no-store'});
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    var txt = await r.text();
+    var txt = await fetchTextWithTimeout(TX_URL + SSE_TX_CODE, {cache:'no-store'}, FETCH_TIMEOUT_MS);
     var m = txt.match(/v_sh000001="([^"]*)"/);
     if(!m) throw new Error('no match');
     var fb = m[1].split('~');
@@ -1168,9 +1201,11 @@ async function loadJson(){
   if(jsonBusy) return false;
   jsonBusy = true;
   try{
-    var r = await fetch('data.json?t='+Date.now(), {cache:'no-store'});
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    var d = await r.json();
+    var text = await fetchTextWithTimeout('data.json?t='+Date.now(), {cache:'no-store'}, FETCH_TIMEOUT_MS);
+    var d = JSON.parse(text);
+    if(!d || !Array.isArray(d.rows) || !isFinite(generatedAtMs(d))) throw new Error('bad data.json');
+    var newTs = generatedAtMs(d), oldTs = generatedAtMs(state.data);
+    if(isFinite(oldTs) && newTs < oldTs) return false;   /* 迟到的旧响应不得覆盖较新基准 */
     /* v2.16.1: 前端版本自检 —— 页面常驻打开时，旧 HTML 的 JS 不会自己更新，
        云端 data.json 带了 ui 版本号；发现线上版本比本页新就自动重载一次，
        带 ?v= 参数强制拿新 HTML（避免浏览器缓存继续顶着旧 JS）。
@@ -1214,9 +1249,8 @@ async function refreshTx(){
   if(!codes.length) return;
   txBusy = true;
   try{
-    var resp = await fetch(TX_URL + codes.join(','), {cache:'no-store'});
-    if(!resp.ok) throw new Error('HTTP '+resp.status);
-    var text = await resp.text();   /* 响应头 charset=GBK，浏览器自动按 GBK 解码 */
+    var text = await fetchTextWithTimeout(TX_URL + codes.join(','), {cache:'no-store'}, FETCH_TIMEOUT_MS);
+    /* 响应头 charset=GBK，浏览器自动按 GBK 解码 */
     var re = /v_(hf_\w+|fu\w+)="([^"]*)"/g, m;
     var tx = {}, maxT = '', maxD = '';
     while((m = re.exec(text))){

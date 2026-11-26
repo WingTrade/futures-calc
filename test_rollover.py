@@ -5,9 +5,12 @@
 前端测试需要 Node.js；未安装时只跳过该组，不影响 Python 判定测试。
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
+from pathlib import Path
 import shutil
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -61,6 +64,68 @@ class SnapshotParsingTests(unittest.TestCase):
                 self.assertAlmostEqual(snap[code]['last'], 652.456)
                 self.assertAlmostEqual(snap[code]['prev_settle'], 660.25)
                 self.assertEqual(snap[code]['volume'], 12345.0)
+
+    @patch('fetch.http_get')
+    def test_bad_last_only_skips_its_own_record(self, mock_get):
+        mock_get.return_value = (
+            'var hq_str_hf_CL="BAD,,,,,,20:00:00,88,,123,,,2026-10-30,";\n'
+            'var hq_str_hf_FEF="89.42,,,,,,20:00:00,89.29,,123,,,2026-10-30,";'
+        )
+        snap = fetch.sina_snapshot(['hf_CL', 'hf_FEF'])
+        self.assertNotIn('hf_CL', snap)
+        self.assertEqual(snap['hf_FEF']['last'], 89.42)
+
+
+class MinlineParsingTests(unittest.TestCase):
+    @patch('fetch.http_get')
+    def test_legacy_rows_roll_forward_across_midnight(self, mock_get):
+        payload = {'result': {'data': {'minLine_1d': [
+            ['2026-11-26', 'x', 'x', 'x', '23:59', '89.42'],
+            ['00:01', '89.50'],
+        ]}}}
+        mock_get.return_value = 'var d=(' + json.dumps(payload) + ');'
+        bars = fetch.sina_minline_today('FEF')
+        self.assertEqual(bars, [
+            (datetime(2026, 11, 26, 23, 59), 89.42),
+            (datetime(2026, 11, 27, 0, 1), 89.50),
+        ])
+
+
+class RolloverFreshnessTests(unittest.TestCase):
+    def test_close_channel_rejects_stale_intraday_table(self):
+        bars = [(datetime(2026, 10, 30, 19, i), 98.0 + i) for i in range(3)]
+        fresh_now = datetime(2026, 10, 30, 19, 30)
+        level, _gap, _why = fetch.rollover_suspect_close(bars, 105, 100, now=fresh_now)
+        self.assertEqual(level, 'fix')
+        stale_now = fresh_now + timedelta(minutes=3)
+        self.assertEqual(fetch.rollover_suspect_close(bars, 105, 100, now=stale_now),
+                         (None, None, ''))
+
+
+class MonthKlineTests(unittest.TestCase):
+    @patch('fetch.http_get')
+    def test_invalid_and_future_bars_do_not_set_range(self, mock_get):
+        arr = [
+            {'date': '2026-11-24', 'low': 100, 'high': 110},
+            {'date': '2026-11-25', 'low': 120, 'high': 110},
+            {'date': '2026-11-27', 'low': 1, 'high': 200},
+            {'date': '2026-11-26', 'low': 105, 'high': 115},
+        ]
+        mock_get.return_value = 'var d=(' + json.dumps(arr) + ');'
+        self.assertEqual(fetch.month_kline_range(
+            'FEF2701', now=datetime(2026, 11, 26, 21, 17)), (100.0, 115.0))
+
+
+class AtomicWriteTests(unittest.TestCase):
+    def test_failed_write_preserves_previous_json_and_cleans_temp(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'data.json'
+            path.write_text('{"old": true}', encoding='utf-8')
+            with patch('fetch.json.dump', side_effect=RuntimeError('disk full')):
+                with self.assertRaises(RuntimeError):
+                    fetch.write_json_atomic(str(path), {'new': True})
+            self.assertEqual(path.read_text(encoding='utf-8'), '{"old": true}')
+            self.assertEqual([p.name for p in Path(td).iterdir()], ['data.json'])
 
 
 class EmCentUnitTests(unittest.TestCase):
@@ -160,6 +225,62 @@ class ActiveContractTests(unittest.TestCase):
         result = self.identify(quote(800.0), {'hf_FEF2612': quote(800.0)})
         self.assertEqual(result['FEF']['contract'], 'FEF2612')
         self.assertEqual(result['FEF']['date'], '2026-10-30')
+
+    def test_zero_position_on_both_sides_is_not_identity_evidence(self):
+        main = quote(800.0, volume=0)
+        candidate = quote(800.0, prev_settle=789.0, volume=0)
+        self.assertEqual(self.identify(main, {'hf_FEF2612': candidate}), {})
+
+
+class KlineRecheckIntegrationTests(unittest.TestCase):
+    """完整跑主流程，重放 2026-11-26 铁矿同值误标，而不是只测一个判断助手。"""
+
+    def run_recheck(self, replay_price):
+        fixed_now = datetime(2026, 11, 26, 21, 17)
+        main_bars = [(fixed_now.replace(hour=15, minute=0), 89.42)]
+        replay_bars = [(fixed_now.replace(hour=15, minute=0), replay_price)]
+        previous = {
+            'contracts': {'FEF': 'FEF2701'},
+            'rows': [{'name': '新加坡铁矿石', 'close': 89.42, 'last': 87.725,
+                      'ref': '11-26 15:00', 'ref_actual': '11-26 15:00', 'gap_min': 0}],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            fake_file = str(Path(td) / 'fetch.py')
+            (Path(td) / 'data.json').write_text(
+                json.dumps(previous, ensure_ascii=False), encoding='utf-8')
+            def minline(symbol):
+                return main_bars if symbol == 'FEF' else replay_bars
+            with patch('fetch.__file__', fake_file), \
+                    patch('fetch.VARIETIES', [('新加坡铁矿石', 'M23', None, 'hf_FEF')]), \
+                    patch('fetch.now_cn', return_value=fixed_now), \
+                    patch('fetch.get_night_calendar', return_value=({'2026-11-26'}, {'2026-11-25'})), \
+                    patch('fetch.sina_snapshot', return_value={'hf_FEF': quote(
+                        87.725, prev_settle=89.29, volume=449123,
+                        time='21:17:00', date='2026-11-26')}), \
+                    patch('fetch.sina_active_contracts', return_value={'FEF': {
+                        'contract': 'FEF2701', 'prev_settle': 89.29, 'date': '2026-11-26'}}), \
+                    patch('fetch.em_snapshot', return_value={}), \
+                    patch('fetch.sina_minline_today', side_effect=minline), \
+                    patch('fetch.month_kline_range', return_value=(87.50, 89.35)), \
+                    patch('fetch.time.sleep'):
+                fetch.main()
+            return json.loads((Path(td) / 'data.json').read_text(encoding='utf-8'))
+
+    def test_same_replayed_price_does_not_invent_rollover(self):
+        data = self.run_recheck(89.42)
+        row = data['rows'][0]
+        self.assertEqual(row['close'], 89.42)
+        self.assertNotIn('roll', row)
+        self.assertNotIn('roll_src', row)
+        self.assertEqual(row['note'], '')
+        self.assertEqual(row['ref_contract'], 'FEF2701')
+
+    def test_real_contract_price_difference_still_fixes(self):
+        data = self.run_recheck(89.10)
+        row = data['rows'][0]
+        self.assertEqual(row['close'], 89.10)
+        self.assertEqual(row['roll'], 'fix')
+        self.assertEqual(row['note'], '换月')
 
 
 JS_HARNESS = r'''
@@ -313,6 +434,103 @@ class FrontendMinlinePointTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0,
                          msg=result.stdout + '\n' + result.stderr)
         self.assertIn('3 类场景通过', result.stdout)
+
+
+POLLING_HARNESS = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+function extract(startMarker, endMarker) {
+  const start = html.indexOf(startMarker);
+  const end = html.indexOf(endMarker, start);
+  assert(start >= 0 && end > start, '无法提取前端函数: ' + startMarker);
+  return html.slice(start, end);
+}
+vm.runInThisContext(
+  extract('async function fetchTextWithTimeout(', 'function loadCache(){') + '\n' +
+  extract('function loadCache(){', 'function saveCache(d){') + '\n' +
+  extract('async function loadJson(){', '/* ---------- 腾讯行情') + '\n' +
+  extract('async function refreshTx(){', '/* ---------- 调度') + '\n' +
+  extract('async function mlFetch(', 'async function mlTick(){')
+);
+var UI_VER = '2.28', FETCH_TIMEOUT_MS = 25, DATA_CACHE_STALE_MS = 7200000;
+var CACHE_KEY = 'test', TX_URL = 'https://unused/', ML_STALE_MIN = 5;
+var jsonBusy = false, txBusy = false, txFail = 0;
+var state = { data:null, tx:{}, sn:{}, snTime:'', snDate:'', txTime:'', txDate:'', txFail:0 };
+var sessionStorage = { getItem:function(){ return null; }, setItem:function(){} };
+var location = { pathname:'/futures-calc/', href:'' };
+var document = { getElementById:function(){ return { textContent:'' }; } };
+function saveCache(){}
+function render(){}
+function setLamp(){}
+function collectCodes(){ return ['hf_CL']; }
+var stored = null;
+var localStorage = { getItem:function(){ return stored; }, setItem:function(){} };
+function pad(n){ return String(n).padStart(2, '0'); }
+function dataStamp(d){
+  return d.getFullYear()+'-'+pad(d.getMonth()+1)+'-'+pad(d.getDate())+' '+
+         pad(d.getHours())+':'+pad(d.getMinutes());
+}
+function hangingFetch(_url, opts){
+  return new Promise(function(_resolve, reject){
+    opts.signal.addEventListener('abort', function(){ reject(new Error('aborted')); });
+  });
+}
+(async function(){
+  fetch = hangingFetch;
+  assert.strictEqual(await loadJson(), false);
+  assert.strictEqual(jsonBusy, false, 'data.json 超时后必须释放忙碌锁');
+
+  const fresh = { ui:'2.28', generated_at:dataStamp(new Date()), rows:[{name:'x', code:'hf_CL'}] };
+  fetch = async function(){ return { ok:true, text:async function(){ return JSON.stringify(fresh); } }; };
+  assert.strictEqual(await loadJson(), true, '超时后的下一轮必须能重新进入');
+  assert.strictEqual(state.data.generated_at, fresh.generated_at);
+
+  const older = Object.assign({}, fresh, { generated_at:'2020-01-01 00:00' });
+  fetch = async function(){ return { ok:true, text:async function(){ return JSON.stringify(older); } }; };
+  assert.strictEqual(await loadJson(), false, '迟到的旧响应不得覆盖新基准');
+  assert.strictEqual(state.data.generated_at, fresh.generated_at);
+
+  fetch = hangingFetch;
+  await refreshTx();
+  assert.strictEqual(txBusy, false, '腾讯正文挂起超时后必须释放忙碌锁');
+
+  state.data = null;
+  stored = JSON.stringify({ ts:Date.now(), data:older });
+  loadCache();
+  assert.strictEqual(state.data, null, '缓存写入时间再新，也不能救活 24 小时以上的起始价');
+
+  stored = JSON.stringify({ ts:Date.now(), data:fresh, sn:{hf_CL:{last:1}} });
+  loadCache();
+  assert(state.data && state.data.generated_at === fresh.generated_at, '新鲜起始价缓存仍可秒开');
+
+  const oldDate = new Date(Date.now() - 3600000);
+  jsonpMinline = async function(){ return { data:{result:{data:{minLine_1d:[1]}}} }; };
+  buildPoints = function(){ return [{ date:dataStamp(oldDate).slice(0,10),
+    min:oldDate.getHours()*60+oldDate.getMinutes(), price:89.42 }]; };
+  hhmmOf = function(min){ return pad(Math.floor(min/60))+':'+pad(min%60); };
+  const mq = await mlFetch('hf_FEF');
+  assert(mq.ageMin >= 59, '分时年龄必须使用完整日期，跨午夜旧价不能变新价');
+  assert.strictEqual(mlTag(mq), '分时 '+mq.t);
+  mq.ageMin = 4; mq.ts = Date.now() - 120000;
+  assert.strictEqual(mlTag(mq), '分时 '+mq.t, '驻留两分钟后年龄不能仍冻结在四分钟');
+  console.log('前端轮询与缓存：8 个场景通过');
+})().catch(function(e){ console.error(e && e.stack || e); process.exit(1); });
+'''
+
+
+@unittest.skipUnless(shutil.which('node'), '前端回归测试需要 Node.js')
+class FrontendPollingTests(unittest.TestCase):
+    def test_timeout_cache_regression_and_minline_age(self):
+        index = Path(__file__).with_name('index.html')
+        result = subprocess.run(
+            [shutil.which('node'), '-e', POLLING_HARNESS, str(index)],
+            capture_output=True, text=True, encoding='utf-8', timeout=20,
+        )
+        self.assertEqual(result.returncode, 0,
+                         msg=result.stdout + '\n' + result.stderr)
+        self.assertIn('8 个场景通过', result.stdout)
 
 
 if __name__ == '__main__':
