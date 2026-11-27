@@ -283,6 +283,70 @@ class KlineRecheckIntegrationTests(unittest.TestCase):
         self.assertEqual(row['note'], '换月')
 
 
+class FcpoSessionIntegrationTests(unittest.TestCase):
+    """v1.26：马棕油 13:30 前与 21:00 前两档，完整主流程锁口径。"""
+
+    def run_at(self, fixed_now, bars, last, quote_time):
+        day = fixed_now.date().isoformat()
+        previous = {'contracts': {'FCPO': 'FCPO2702'}, 'rows': []}
+        with tempfile.TemporaryDirectory() as td:
+            fake_file = str(Path(td) / 'fetch.py')
+            (Path(td) / 'data.json').write_text(
+                json.dumps(previous, ensure_ascii=False), encoding='utf-8')
+            with patch('fetch.__file__', fake_file), \
+                    patch('fetch.VARIETIES', [('马棕油', 'M23', '110.MPM00Y', 'hf_FCPO')]), \
+                    patch('fetch.now_cn', return_value=fixed_now), \
+                    patch('fetch.get_night_calendar', return_value=({day}, {'2026-11-26'})), \
+                    patch('fetch.sina_snapshot', return_value={'hf_FCPO': quote(
+                        last, prev_settle=4050.0, volume=62003,
+                        time=quote_time, date=day)}), \
+                    patch('fetch.sina_active_contracts', return_value={'FCPO': {
+                        'contract': 'FCPO2702', 'prev_settle': 4050.0, 'date': day}}), \
+                    patch('fetch.em_snapshot', return_value={}), \
+                    patch('fetch.sina_minline_today', return_value=bars), \
+                    patch('fetch.em_kline5', return_value=[]), \
+                    patch('fetch.time.sleep'):
+                fetch.main()
+            return json.loads((Path(td) / 'data.json').read_text(encoding='utf-8'))
+
+    def test_before_1330_compares_1130_to_1230_close(self):
+        bars = [
+            (datetime(2026, 11, 27, 11, 29), 4098.0),
+            (datetime(2026, 11, 27, 11, 30), 4100.0),
+            (datetime(2026, 11, 27, 12, 29), 4140.0),
+        ]
+        data = self.run_at(datetime(2026, 11, 27, 12, 31, 6), bars, 4140.0, '12:29:59')
+        row = data['rows'][0]
+        self.assertEqual(data['mode'], 'm1130')
+        self.assertEqual((row['close'], row['last'], row['chg']), (4100.0, 4140.0, 40.0))
+        self.assertAlmostEqual(row['pct'], 40.0 / 4100.0 * 100)
+        self.assertEqual(row['ref'], '11-27 11:30')
+        self.assertEqual(row['ref_actual'], '11-27 11:30')
+
+    def test_before_2100_compares_1500_to_1800_close(self):
+        bars = [
+            (datetime(2026, 11, 27, 11, 30), 4100.0),
+            (datetime(2026, 11, 27, 12, 29), 4140.0),
+            (datetime(2026, 11, 27, 15, 0), 4200.0),
+            (datetime(2026, 11, 27, 17, 59), 4260.0),
+        ]
+        data = self.run_at(datetime(2026, 11, 27, 18, 1, 6), bars, 4260.0, '17:59:57')
+        row = data['rows'][0]
+        self.assertEqual(data['mode'], 'day')
+        self.assertEqual((row['close'], row['last'], row['chg']), (4200.0, 4260.0, 60.0))
+        self.assertAlmostEqual(row['pct'], 60.0 / 4200.0 * 100)
+        self.assertEqual(row['ref'], '11-27 15:00')
+        self.assertEqual(row['ref_actual'], '11-27 15:00')
+
+    def test_close_capture_and_backup_crons_are_registered(self):
+        workflow = (Path(__file__).parent / '.github' / 'workflows' / 'fetch.yml').read_text(
+            encoding='utf-8')
+        for cron in ('0 4 * * *', '40 4 * * 1-5',
+                     '30 9 * * 1-5', '10 10 * * 1-5'):
+            with self.subTest(cron=cron):
+                self.assertIn(f"- cron: '{cron}'", workflow)
+
+
 JS_HARNESS = r'''
 const fs = require('fs');
 const vm = require('vm');
@@ -434,6 +498,53 @@ class FrontendMinlinePointTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0,
                          msg=result.stdout + '\n' + result.stderr)
         self.assertIn('3 类场景通过', result.stdout)
+
+
+FCPO_VISIBILITY_HARNESS = r'''
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const html = fs.readFileSync(process.argv[1], 'utf8');
+function extract(startMarker, endMarker) {
+  const start = html.indexOf(startMarker);
+  const end = html.indexOf(endMarker, start);
+  assert(start >= 0 && end > start, '无法提取前端函数: ' + startMarker);
+  return html.slice(start, end);
+}
+var fakeNow = { wd:5, h:11, min:30 };
+Date = function(){ return {
+  getDay:function(){ return fakeNow.wd; },
+  getHours:function(){ return fakeNow.h; },
+  getMinutes:function(){ return fakeNow.min; }
+}; };
+vm.runInThisContext(
+  extract('function fpoVisible(){', 'function a50Visible(){') + '\n' +
+  extract('function expectMode(){', 'function probeNode(mode){')
+);
+const cases = [
+  [11,30,true,'m1130'], [12,30,true,'m1130'], [13,29,true,'m1130'],
+  [18,0,true,'day'], [20,59,true,'day'], [23,0,false,'night']
+];
+for(const c of cases){
+  fakeNow.h=c[0]; fakeNow.min=c[1];
+  assert.strictEqual(fpoVisible(), c[2], `${c[0]}:${c[1]} 显示窗口错误`);
+  assert.strictEqual(expectMode(), c[3], `${c[0]}:${c[1]} 档位错误`);
+}
+console.log('马棕油国内开盘前显示：6 个场景通过');
+'''
+
+
+@unittest.skipUnless(shutil.which('node'), '前端回归测试需要 Node.js')
+class FrontendFcpoVisibilityTests(unittest.TestCase):
+    def test_visible_in_m1130_and_day_windows(self):
+        index = Path(__file__).with_name('index.html')
+        result = subprocess.run(
+            [shutil.which('node'), '-e', FCPO_VISIBILITY_HARNESS, str(index)],
+            capture_output=True, text=True, encoding='utf-8', timeout=20,
+        )
+        self.assertEqual(result.returncode, 0,
+                         msg=result.stdout + '\n' + result.stderr)
+        self.assertIn('6 个场景通过', result.stdout)
 
 
 POLLING_HARNESS = r'''
