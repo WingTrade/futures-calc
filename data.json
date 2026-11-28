@@ -1,11 +1,11 @@
 {
- "generated_at": "2026-11-28 08:51",
+ "generated_at": "2026-11-28 10:58",
  "mode": "night",
  "title": "隔夜涨跌统计",
  "mode_desc": "隔夜",
  "ref_desc": "参考(有色01:00/贵金属02:30/其他23:00): 23:00→11-27 23:00  01:00→11-28 01:00  02:30→11-28 02:30",
  "ui": "2.28",
- "em_ok": false,
+ "em_ok": true,
  "sina_ok": true,
  "kline_fail": 0,
  "contracts": {
